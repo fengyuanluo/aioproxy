@@ -1,0 +1,14 @@
+[Unit]
+Description=AIOPROXY
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/aioproxy
+ExecStart=/opt/aioproxy/aioproxy serve -c /opt/aioproxy/config.yaml
+Restart=on-failure
+RestartSec=3s
+
+[Install]
+WantedBy=multi-user.target
