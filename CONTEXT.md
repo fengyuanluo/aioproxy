@@ -93,3 +93,9 @@ A saved candidate-pool state that is loaded on service restart so previously val
 
 ### Concurrency Acceptance Gate
 A v1 completion criterion requiring AIOPROXY to pass a 300-concurrent-client stress scenario without process crash, panic, or deadlock before the release can be considered complete.
+
+### Degraded Health
+An observable service state where AIOPROXY is running but at least one configured proxy source or plugin is failing, empty, or otherwise unable to contribute candidates as expected.
+
+### Plugin Degradation
+A plugin state indicating that the plugin is configured but its latest refresh failed or produced no usable candidates.
