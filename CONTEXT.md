@@ -105,3 +105,6 @@ A read-only administrative response shape that exposes only basic operational in
 
 ### Graceful Shutdown
 A service lifecycle behavior where AIOPROXY stops accepting new work after a shutdown signal, gives in-flight proxy connections a bounded time to finish, persists candidate-pool and snapshot state, and exits without persisting session bindings.
+
+### No Active Plugin State
+A service state where no configured proxy-source plugin is active, leaving AIOPROXY without a live source for new proxy candidates.
