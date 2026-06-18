@@ -99,3 +99,6 @@ An observable service state where AIOPROXY is running but at least one configure
 
 ### Plugin Degradation
 A plugin state indicating that the plugin is configured but its latest refresh failed or produced no usable candidates.
+
+### Basic Admin API View
+A read-only administrative response shape that exposes only basic operational information. It is not a raw debug dump and does not include secret-bearing source material or full proxy node definitions.
