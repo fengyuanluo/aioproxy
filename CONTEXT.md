@@ -90,3 +90,6 @@ A plugin-driven refresh that happens on a timer rather than through a mutation e
 
 ### Persistent Candidate Pool
 A saved candidate-pool state that is loaded on service restart so previously validated candidates remain available before or alongside new scheduled refreshes.
+
+### Concurrency Acceptance Gate
+A v1 completion criterion requiring AIOPROXY to pass a 300-concurrent-client stress scenario without process crash, panic, or deadlock before the release can be considered complete.
