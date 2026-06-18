@@ -38,7 +38,11 @@ func (v *Validator) Validate(ctx context.Context, candidates []core.Candidate, d
 		go func() {
 			defer wg.Done()
 			for c := range in {
-				if v.ValidateOne(ctx, c, dialers[c.Fingerprint]) == nil {
+				var dialer core.CandidateDialer
+				if dialers != nil {
+					dialer = dialers[c.Fingerprint]
+				}
+				if v.ValidateOne(ctx, c, dialer) == nil {
 					c.LastValidation = time.Now()
 					out <- c
 				}

@@ -14,7 +14,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26.x'
-      - run: go test ./...
+      - run: GOFLAGS=-mod=readonly go test ./...
 
   build:
     runs-on: ubuntu-latest
@@ -39,16 +39,24 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26.x'
-      - name: Build
+      - name: Build and package
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p dist
+          mkdir -p dist pkg
           ext=""
           if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
           name="aioproxy_${{ matrix.goos }}_${{ matrix.goarch }}"
-          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "dist/${name}${ext}" ./cmd/aioproxy
-          (cd dist && sha256sum "${name}${ext}" > "${name}.sha256")
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o "pkg/aioproxy${ext}" ./cmd/aioproxy
+          cp README.md pkg/
+          cp -r examples docs deploy pkg/
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            (cd pkg && zip -qr "../dist/${name}.zip" .)
+            (cd dist && sha256sum "${name}.zip" > "${name}.zip.sha256")
+          else
+            tar -C pkg -czf "dist/${name}.tar.gz" .
+            (cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256")
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: aioproxy-${{ matrix.goos }}-${{ matrix.goarch }}
@@ -62,10 +70,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - name: Collect
+      - name: Collect checksums
         run: |
           mkdir -p release
           find artifacts -type f -maxdepth 3 -print -exec cp {} release/ \;
+          (cd release && cat *.sha256 > checksums.txt)
       - uses: softprops/action-gh-release@v2
         with:
           files: release/*

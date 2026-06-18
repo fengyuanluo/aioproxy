@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -42,12 +43,13 @@ func (s *Server) Start() error {
 	s.logger.Info("admin listener started", "listen", s.cfg.Listen)
 	return nil
 }
-func (s *Server) Shutdown(r *http.Request) {}
-func (s *Server) Close(ctxDeadline time.Duration) error {
+func (s *Server) Close(timeout time.Duration) error {
 	if s.srv == nil {
 		return nil
 	}
-	return s.srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return s.srv.Shutdown(ctx)
 }
 
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
@@ -64,8 +66,9 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 }
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	total, avail := s.pool.Count()
-	degraded := avail == 0
-	for _, st := range s.statuses() {
+	statuses := s.statuses()
+	degraded := avail == 0 || len(statuses) == 0
+	for _, st := range statuses {
 		if !st.Active || st.Degraded {
 			degraded = true
 		}

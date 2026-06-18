@@ -28,10 +28,12 @@ type Server struct {
 	listener     net.Listener
 	shuttingDown atomic.Bool
 	wg           sync.WaitGroup
+	connMu       sync.Mutex
+	conns        map[net.Conn]struct{}
 }
 
 func NewServer(cfg config.Config, pool *core.Pool, sessions *core.SessionManager, logger *slog.Logger) *Server {
-	return &Server{cfg: cfg, pool: pool, sessions: sessions, logger: logger}
+	return &Server{cfg: cfg, pool: pool, sessions: sessions, logger: logger, conns: map[net.Conn]struct{}{}}
 }
 
 func (s *Server) Start(ctx context.Context) error {
@@ -46,6 +48,13 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
+func (s *Server) Addr() string {
+	if s.listener == nil {
+		return ""
+	}
+	return s.listener.Addr().String()
+}
+
 func (s *Server) Close() error {
 	s.shuttingDown.Store(true)
 	if s.listener != nil {
@@ -53,12 +62,38 @@ func (s *Server) Close() error {
 	}
 	return nil
 }
+func (s *Server) trackConn(conn net.Conn) {
+	s.connMu.Lock()
+	s.conns[conn] = struct{}{}
+	s.connMu.Unlock()
+}
+
+func (s *Server) untrackConn(conn net.Conn) {
+	s.connMu.Lock()
+	delete(s.conns, conn)
+	s.connMu.Unlock()
+}
+
+func (s *Server) forceCloseActive() {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	for conn := range s.conns {
+		_ = conn.Close()
+	}
+}
+
 func (s *Server) Wait(timeout time.Duration) {
 	ch := make(chan struct{})
 	go func() { s.wg.Wait(); close(ch) }()
 	select {
 	case <-ch:
+		return
 	case <-time.After(timeout):
+		s.forceCloseActive()
+	}
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
 	}
 }
 
@@ -72,8 +107,13 @@ func (s *Server) acceptLoop() {
 			s.logger.Warn("proxy accept failed", "error", err)
 			continue
 		}
+		s.trackConn(conn)
 		s.wg.Add(1)
-		go func() { defer s.wg.Done(); s.handleConn(conn) }()
+		go func() {
+			defer s.wg.Done()
+			defer s.untrackConn(conn)
+			s.handleConn(conn)
+		}()
 	}
 }
 
@@ -207,11 +247,23 @@ func (s *Server) handleHTTP(client net.Conn, br *bufio.Reader) {
 		req.URL.Host = ""
 		req.RequestURI = ""
 	}
+	req.Close = true
+	req.Header.Set("Connection", "close")
 	if err := req.Write(up); err != nil {
 		s.pool.MarkFailure(cand.Fingerprint, err.Error(), s.cfg.RuntimeFailure.MaxFailures)
 		return
 	}
-	s.tunnel(client, up, cand)
+	resp, err := http.ReadResponse(bufio.NewReader(up), req)
+	if err != nil {
+		s.pool.MarkFailure(cand.Fingerprint, err.Error(), s.cfg.RuntimeFailure.MaxFailures)
+		return
+	}
+	defer resp.Body.Close()
+	if err := resp.Write(client); err != nil {
+		s.pool.MarkFailure(cand.Fingerprint, err.Error(), s.cfg.RuntimeFailure.MaxFailures)
+		return
+	}
+	s.pool.MarkSuccess(cand.Fingerprint)
 }
 
 func (s *Server) authenticate(username, password string) (core.SessionInfo, bool) {
@@ -235,20 +287,39 @@ func (s *Server) dialScheduled(target string, info core.SessionInfo) (net.Conn, 
 }
 
 func (s *Server) tunnel(a net.Conn, b net.Conn, cand core.Candidate) {
-	var bytesUp atomic.Int64
+	var bytes atomic.Int64
 	done := make(chan struct{}, 2)
-	go func() { n, _ := io.Copy(b, a); bytesUp.Add(n); _ = b.SetDeadline(time.Now()); done <- struct{}{} }()
-	go func() { n, _ := io.Copy(a, b); bytesUp.Add(n); _ = a.SetDeadline(time.Now()); done <- struct{}{} }()
+	go func() {
+		_, _ = io.Copy(&countingWriter{Writer: b, count: &bytes}, a)
+		_ = b.SetDeadline(time.Now())
+		done <- struct{}{}
+	}()
+	go func() {
+		_, _ = io.Copy(&countingWriter{Writer: a, count: &bytes}, b)
+		_ = a.SetDeadline(time.Now())
+		done <- struct{}{}
+	}()
 	select {
 	case <-done:
 	case <-time.After(s.cfg.RuntimeFailure.EarlyFailureWindow.Duration):
 	}
-	if bytesUp.Load() == 0 {
+	if bytes.Load() == 0 {
 		s.pool.MarkFailure(cand.Fingerprint, "early zero-byte closure", s.cfg.RuntimeFailure.MaxFailures)
 	} else {
 		s.pool.MarkSuccess(cand.Fingerprint)
 	}
 	<-done
+}
+
+type countingWriter struct {
+	io.Writer
+	count *atomic.Int64
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	n, err := w.Writer.Write(p)
+	w.count.Add(int64(n))
+	return n, err
 }
 
 func readSocksAuth(br *bufio.Reader, client net.Conn) (string, string, bool) {

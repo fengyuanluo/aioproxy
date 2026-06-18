@@ -132,6 +132,14 @@ type AuthConfig struct {
 	Enabled  bool   `yaml:"enabled"`
 	Username string `yaml:"username"`
 	Password string `yaml:"password"`
+	seen     bool
+}
+
+func (a *AuthConfig) UnmarshalYAML(value *yaml.Node) error {
+	type raw AuthConfig
+	a.seen = true
+	a.Enabled = true
+	return value.Decode((*raw)(a))
 }
 
 type SchedulerConfig struct {
@@ -241,6 +249,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.Admin.Listen == "" {
 		c.Admin.Listen = DefaultAdminListen
+	}
+	if !c.Auth.seen {
+		c.Auth.Enabled = true
 	}
 	if c.Auth.Username == "" {
 		c.Auth.Username = DefaultCredentialUser

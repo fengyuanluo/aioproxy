@@ -188,7 +188,7 @@ func newPluginManager(cfg *config.Config, pool *core.Pool, store *storage.Store,
 		pm.items = append(pm.items, singbox.New(*cfg.Plugins.SingBox))
 	}
 	for _, p := range pm.items {
-		pm.status[p.Name()] = core.PluginStatus{Name: p.Name(), Active: true}
+		pm.status[p.Name()] = core.PluginStatus{Name: p.Name(), Active: true, Degraded: true, LastError: "not refreshed yet"}
 	}
 	return pm
 }
@@ -262,13 +262,37 @@ func (pm *pluginManager) refresh(ctx context.Context, p plugins.Plugin) {
 		lastErr = "zero candidates passed validation"
 	}
 	pm.pool.AddValidated(valid, res.Dialers)
-	for _, r := range res.Reports {
-		r.Validated = len(valid)
-		_ = pm.store.SaveSnapshot(p.Name()+"-"+r.Source, r, valid)
+	updatedReports := make([]core.ImportReport, len(res.Reports))
+	copy(updatedReports, res.Reports)
+	for i := range updatedReports {
+		reportCandidates := filterCandidatesForReport(valid, p.Name(), updatedReports[i].Source)
+		updatedReports[i].Validated = len(reportCandidates)
+		_ = pm.store.SaveSnapshot(p.Name()+"-"+updatedReports[i].Source, updatedReports[i], reportCandidates)
 	}
 	_ = pm.store.SavePool(pm.pool.List())
 	pm.mu.Lock()
-	pm.status[p.Name()] = core.PluginStatus{Name: p.Name(), Active: true, Degraded: degraded, LastRefresh: time.Now(), LastError: lastErr, Reports: res.Reports}
+	pm.status[p.Name()] = core.PluginStatus{Name: p.Name(), Active: true, Degraded: degraded, LastRefresh: time.Now(), LastError: lastErr, Reports: updatedReports}
 	pm.mu.Unlock()
 	pm.logger.Info("plugin refresh finished", "plugin", p.Name(), "imported", len(res.Candidates), "validated", len(valid), "degraded", degraded)
+}
+
+func filterCandidatesForReport(candidates []core.Candidate, pluginName, reportSource string) []core.Candidate {
+	out := make([]core.Candidate, 0, len(candidates))
+	for _, c := range candidates {
+		if c.Source != pluginName {
+			continue
+		}
+		if reportSource == "" || c.Metadata["query"] == reportSource || c.Metadata["source"] == reportSource || c.Source == reportSource || len(candidates) == 1 {
+			out = append(out, c)
+		}
+	}
+	if len(out) > 0 {
+		return out
+	}
+	for _, c := range candidates {
+		if c.Source == pluginName {
+			out = append(out, c)
+		}
+	}
+	return out
 }

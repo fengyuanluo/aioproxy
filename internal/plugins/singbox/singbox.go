@@ -19,8 +19,28 @@ import (
 
 	box "github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/adapter"
-	"github.com/sagernet/sing-box/include"
+	"github.com/sagernet/sing-box/adapter/endpoint"
+	"github.com/sagernet/sing-box/adapter/inbound"
+	"github.com/sagernet/sing-box/adapter/outbound"
+	boxservice "github.com/sagernet/sing-box/adapter/service"
+	"github.com/sagernet/sing-box/dns"
+	"github.com/sagernet/sing-box/dns/transport"
+	"github.com/sagernet/sing-box/dns/transport/hosts"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/protocol/anytls"
+	"github.com/sagernet/sing-box/protocol/block"
+	"github.com/sagernet/sing-box/protocol/direct"
+	"github.com/sagernet/sing-box/protocol/group"
+	boxhttp "github.com/sagernet/sing-box/protocol/http"
+	"github.com/sagernet/sing-box/protocol/hysteria"
+	"github.com/sagernet/sing-box/protocol/hysteria2"
+	"github.com/sagernet/sing-box/protocol/shadowsocks"
+	"github.com/sagernet/sing-box/protocol/shadowtls"
+	"github.com/sagernet/sing-box/protocol/socks"
+	"github.com/sagernet/sing-box/protocol/ssh"
+	"github.com/sagernet/sing-box/protocol/trojan"
+	"github.com/sagernet/sing-box/protocol/vless"
+	"github.com/sagernet/sing-box/protocol/vmess"
 	M "github.com/sagernet/sing/common/metadata"
 	S "github.com/sagernet/sing/service"
 	"gopkg.in/yaml.v3"
@@ -29,11 +49,38 @@ import (
 	"github.com/aioproxy/aioproxy/internal/core"
 )
 
+func minimalSingBoxContext(ctx context.Context) context.Context {
+	inReg := inbound.NewRegistry()
+	outReg := outbound.NewRegistry()
+	direct.RegisterOutbound(outReg)
+	block.RegisterOutbound(outReg)
+	group.RegisterSelector(outReg)
+	group.RegisterURLTest(outReg)
+	hysteria.RegisterOutbound(outReg)
+	hysteria2.RegisterOutbound(outReg)
+	socks.RegisterOutbound(outReg)
+	boxhttp.RegisterOutbound(outReg)
+	shadowsocks.RegisterOutbound(outReg)
+	vmess.RegisterOutbound(outReg)
+	trojan.RegisterOutbound(outReg)
+	shadowtls.RegisterOutbound(outReg)
+	vless.RegisterOutbound(outReg)
+	anytls.RegisterOutbound(outReg)
+	ssh.RegisterOutbound(outReg)
+	dnsReg := dns.NewTransportRegistry()
+	transport.RegisterTCP(dnsReg)
+	transport.RegisterUDP(dnsReg)
+	transport.RegisterTLS(dnsReg)
+	transport.RegisterHTTPS(dnsReg)
+	hosts.RegisterTransport(dnsReg)
+	return box.Context(ctx, inReg, outReg, endpoint.NewRegistry(), dnsReg, boxservice.NewRegistry())
+}
+
 type Plugin struct {
 	cfg    config.SingBoxConfig
 	client *http.Client
 	mu     sync.Mutex
-	boxes  []*box.Box
+	boxes  map[string]interface{ Close() error }
 }
 
 func New(cfg config.SingBoxConfig) *Plugin {
@@ -44,11 +91,10 @@ func (p *Plugin) Active() bool                   { return len(p.cfg.Sources) > 0
 func (p *Plugin) RefreshInterval() time.Duration { return p.cfg.RefreshInterval.Duration }
 
 func (p *Plugin) Refresh(ctx context.Context) core.PluginResult {
-	p.closeBoxes()
 	var all []core.Candidate
 	dialers := map[string]core.CandidateDialer{}
 	var reports []core.ImportReport
-	var newBoxes []*box.Box
+	newBoxes := map[string]interface{ Close() error }{}
 	for _, src := range p.cfg.Sources {
 		started := time.Now()
 		rep := core.ImportReport{Plugin: p.Name(), Source: src.Name, StartedAt: started, SkipReasons: map[string]int{}, Metadata: map[string]string{"type": src.Type}}
@@ -59,12 +105,12 @@ func (p *Plugin) Refresh(ctx context.Context) core.PluginResult {
 			reports = append(reports, rep)
 			continue
 		}
-		cands, ds, b, err := p.importContent(ctx, src.Name, content, &rep)
+		cands, ds, boxes, err := p.importContent(ctx, src.Name, content, &rep)
 		if err != nil {
 			rep.Error = err.Error()
 		}
-		if b != nil {
-			newBoxes = append(newBoxes, b)
+		for fp, b := range boxes {
+			newBoxes[fp] = b
 		}
 		rep.Imported = len(cands)
 		rep.FinishedAt = time.Now()
@@ -75,7 +121,15 @@ func (p *Plugin) Refresh(ctx context.Context) core.PluginResult {
 		}
 	}
 	p.mu.Lock()
-	p.boxes = newBoxes
+	if p.boxes == nil {
+		p.boxes = map[string]interface{ Close() error }{}
+	}
+	for fp, b := range newBoxes {
+		if old := p.boxes[fp]; old != nil {
+			_ = old.Close()
+		}
+		p.boxes[fp] = b
+	}
 	p.mu.Unlock()
 	return core.PluginResult{Candidates: all, Dialers: dialers, Reports: reports}
 }
@@ -113,7 +167,7 @@ func (p *Plugin) readSource(ctx context.Context, src config.SingBoxSourceConfig)
 	}
 }
 
-func (p *Plugin) importContent(ctx context.Context, source string, content []byte, rep *core.ImportReport) ([]core.Candidate, map[string]core.CandidateDialer, *box.Box, error) {
+func (p *Plugin) importContent(ctx context.Context, source string, content []byte, rep *core.ImportReport) ([]core.Candidate, map[string]core.CandidateDialer, map[string]interface{ Close() error }, error) {
 	outbounds, err := parseToOutbounds(content, rep)
 	if err != nil {
 		return nil, nil, nil, err
@@ -121,51 +175,61 @@ func (p *Plugin) importContent(ctx context.Context, source string, content []byt
 	if len(outbounds) == 0 {
 		return nil, nil, nil, fmt.Errorf("zero convertible sing-box outbounds")
 	}
-	cfgMap := map[string]any{"log": map[string]any{"disabled": true}, "outbounds": outbounds, "route": map[string]any{"final": outbounds[0]["tag"]}}
+	var cands []core.Candidate
+	dialers := map[string]core.CandidateDialer{}
+	boxes := map[string]interface{ Close() error }{}
+	for _, ob := range outbounds {
+		cand, dialer, b, err := buildSingleOutbound(ctx, ob, source)
+		if err != nil {
+			typ := fmt.Sprint(ob["type"])
+			rep.AddSkip("build_failed_" + typ)
+			continue
+		}
+		cands = append(cands, cand)
+		dialers[cand.Fingerprint] = dialer
+		boxes[cand.Fingerprint] = b
+	}
+	if len(cands) == 0 {
+		for _, b := range boxes {
+			_ = b.Close()
+		}
+		return nil, nil, nil, fmt.Errorf("zero sing-box nodes started")
+	}
+	return cands, dialers, boxes, nil
+}
+
+func buildSingleOutbound(parent context.Context, ob map[string]any, source string) (core.Candidate, core.CandidateDialer, *box.Box, error) {
+	tag, _ := ob["tag"].(string)
+	if tag == "" {
+		tag = "node-" + shortHash([]byte(fmt.Sprint(ob)))
+		ob["tag"] = tag
+	}
+	typ, _ := ob["type"].(string)
+	cfgMap := map[string]any{"log": map[string]any{"disabled": true}, "dns": map[string]any{"servers": []map[string]any{{"type": "udp", "tag": "dns-default", "server": "1.1.1.1"}}, "final": "dns-default"}, "outbounds": []map[string]any{cleanOutboundMap(ob)}, "route": map[string]any{"final": tag}}
 	jsonBytes, _ := json.Marshal(cfgMap)
-	ctx = include.Context(ctx)
+	ctx := minimalSingBoxContext(parent)
 	var opts option.Options
 	if err := opts.UnmarshalJSONContext(ctx, jsonBytes); err != nil {
-		return nil, nil, nil, err
+		return core.Candidate{}, nil, nil, err
 	}
 	b, err := box.New(box.Options{Options: opts, Context: ctx})
 	if err != nil {
-		return nil, nil, nil, err
+		return core.Candidate{}, nil, nil, err
 	}
 	if err := b.Start(); err != nil {
 		_ = b.Close()
-		return nil, nil, nil, err
+		return core.Candidate{}, nil, nil, err
 	}
-	var cands []core.Candidate
-	dialers := map[string]core.CandidateDialer{}
-	configHash := shortHash(jsonBytes)
-	for _, ob := range outbounds {
-		tag, _ := ob["tag"].(string)
-		typ, _ := ob["type"].(string)
-		if tag == "" {
-			continue
-		}
-		outbound, ok := b.Outbound().Outbound(tag)
-		if !ok {
-			rep.AddSkip("outbound_not_found")
-			continue
-		}
-		server := fmt.Sprint(ob["server"])
-		port := 0
-		switch v := ob["server_port"].(type) {
-		case int:
-			port = v
-		case float64:
-			port = int(v)
-		case uint16:
-			port = int(v)
-		}
-		c := core.Candidate{Protocol: core.ProtocolSingBox, Host: server, Port: port, Source: "singbox", Name: tag, Metadata: map[string]string{"tag": tag, "type": typ, "config_hash": configHash}}
-		c.Normalize()
-		cands = append(cands, c)
-		dialers[c.Fingerprint] = &outboundDialer{outbound: outbound}
+	outbound, ok := b.Outbound().Outbound(tag)
+	if !ok {
+		_ = b.Close()
+		return core.Candidate{}, nil, nil, fmt.Errorf("outbound not found")
 	}
-	return cands, dialers, b, nil
+	server := fmt.Sprint(ob["server"])
+	port := toInt(ob["server_port"])
+	c := core.Candidate{Protocol: core.ProtocolSingBox, Host: server, Port: port, Source: "singbox", Name: tag, Metadata: map[string]string{"tag": tag, "type": typ, "source": source, "config_hash": shortHash(jsonBytes)}}
+	c.Normalize()
+	return c, &outboundDialer{outbound: outbound}, b, nil
 }
 
 type outboundDialer struct{ outbound adapter.Outbound }
@@ -562,3 +626,22 @@ func shortHash(b []byte) string       { h := sha256.Sum256(b); return hex.Encode
 
 // Keep imported service package reachable for sing-box service.Context generic init in older toolchains.
 var _ = S.ContextWithDefaultRegistry
+
+func obString(m map[string]any, key string) string {
+	v := fmt.Sprint(m[key])
+	if v == "<nil>" {
+		return ""
+	}
+	return v
+}
+
+func cleanOutboundMap(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		if strings.HasPrefix(k, "_") {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
