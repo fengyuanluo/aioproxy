@@ -88,7 +88,7 @@ func (v *Validator) ValidateOne(parent context.Context, c core.Candidate, dialer
 	}
 	defer conn.Close()
 	transport := &http.Transport{DialContext: func(context.Context, string, string) (net.Conn, error) { return conn, nil }, DisableKeepAlives: true, TLSClientConfig: &tls.Config{InsecureSkipVerify: v.cfg.TLSInsecure}}
-	client := &http.Client{Transport: transport, Timeout: v.cfg.Timeout.Duration}
+	client := &http.Client{Transport: transport, Timeout: v.cfg.Timeout.Duration, CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, validationURL, nil)
 	if err != nil {
 		return err
