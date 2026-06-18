@@ -102,3 +102,6 @@ A plugin state indicating that the plugin is configured but its latest refresh f
 
 ### Basic Admin API View
 A read-only administrative response shape that exposes only basic operational information. It is not a raw debug dump and does not include secret-bearing source material or full proxy node definitions.
+
+### Graceful Shutdown
+A service lifecycle behavior where AIOPROXY stops accepting new work after a shutdown signal, gives in-flight proxy connections a bounded time to finish, persists candidate-pool and snapshot state, and exits without persisting session bindings.
