@@ -1,0 +1,30 @@
+# Local runtime state
+/data/
+/logs/
+/tmp/
+
+# Local configs and secrets
+.env
+.env.*
+config.yaml
+*.local.yaml
+secrets*.yaml
+
+# Build outputs
+/bin/
+/dist/
+/build/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go test/build artifacts
+coverage.out
+*.test
+*.prof
+
+# Editor/OS noise
+.DS_Store
+.vscode/
+.idea/
