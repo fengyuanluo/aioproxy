@@ -11,6 +11,7 @@ type SessionManager struct {
 	bindings   map[string]sessionBinding
 	defaultTTL time.Duration
 	maxTTL     time.Duration
+	lastSweep  time.Time
 }
 
 type sessionBinding struct {
@@ -64,15 +65,21 @@ func (m *SessionManager) Pick(info SessionInfo, pool *Pool, policy string) (Cand
 	}
 	now := time.Now()
 	m.mu.Lock()
-	if b, ok := m.bindings[info.SessionID]; ok && now.Before(b.ExpiresAt) && pool.IsAvailable(b.Fingerprint) {
-		b.ExpiresAt = now.Add(b.TTL)
-		m.bindings[info.SessionID] = b
-		m.mu.Unlock()
-		return pool.Get(b.Fingerprint)
+	m.sweepExpiredLocked(now, time.Minute)
+	if b, ok := m.bindings[info.SessionID]; ok && now.Before(b.ExpiresAt) {
+		c, available := pool.GetAvailable(b.Fingerprint)
+		if !available {
+			delete(m.bindings, info.SessionID)
+		} else {
+			b.ExpiresAt = now.Add(b.TTL)
+			m.bindings[info.SessionID] = b
+			m.mu.Unlock()
+			return c, true
+		}
 	}
-	m.mu.Unlock()
 	c, ok := pool.Pick(policy)
 	if !ok {
+		m.mu.Unlock()
 		return Candidate{}, false
 	}
 	ttl := info.TTL
@@ -82,20 +89,26 @@ func (m *SessionManager) Pick(info SessionInfo, pool *Pool, policy string) (Cand
 	if m.maxTTL > 0 && ttl > m.maxTTL {
 		ttl = m.maxTTL
 	}
-	m.mu.Lock()
 	m.bindings[info.SessionID] = sessionBinding{Fingerprint: c.Fingerprint, ExpiresAt: now.Add(ttl), TTL: ttl}
 	m.mu.Unlock()
 	return c, true
 }
 
-func (m *SessionManager) Count() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	now := time.Now()
+func (m *SessionManager) sweepExpiredLocked(now time.Time, interval time.Duration) {
+	if interval > 0 && !m.lastSweep.IsZero() && now.Sub(m.lastSweep) < interval {
+		return
+	}
 	for k, v := range m.bindings {
-		if now.After(v.ExpiresAt) {
+		if !now.Before(v.ExpiresAt) {
 			delete(m.bindings, k)
 		}
 	}
+	m.lastSweep = now
+}
+
+func (m *SessionManager) Count() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sweepExpiredLocked(time.Now(), 0)
 	return len(m.bindings)
 }

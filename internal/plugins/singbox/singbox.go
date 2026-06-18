@@ -549,7 +549,7 @@ func mapTransport(s string) string {
 
 func convertibleType(t string) bool {
 	switch strings.ToLower(t) {
-	case "direct", "block", "socks", "http", "shadowsocks", "vmess", "vless", "trojan", "hysteria", "hysteria2", "anytls", "shadowtls", "ssh", "tuic", "naive":
+	case "direct", "block", "socks", "http", "shadowsocks", "vmess", "vless", "trojan", "hysteria", "hysteria2", "anytls", "shadowtls", "ssh":
 		return true
 	}
 	return false

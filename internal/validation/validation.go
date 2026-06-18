@@ -49,8 +49,13 @@ func (v *Validator) Validate(ctx context.Context, candidates []core.Candidate, d
 			}
 		}()
 	}
+sendLoop:
 	for _, c := range candidates {
-		in <- c
+		select {
+		case <-ctx.Done():
+			break sendLoop
+		case in <- c:
+		}
 	}
 	close(in)
 	wg.Wait()

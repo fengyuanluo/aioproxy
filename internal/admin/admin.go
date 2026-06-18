@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -35,12 +36,16 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/plugins", s.auth(s.plugins))
 	mux.HandleFunc("/snapshots", s.auth(s.snapshots))
 	s.srv = &http.Server{Addr: s.cfg.Listen, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	ln, err := net.Listen("tcp", s.cfg.Listen)
+	if err != nil {
+		return err
+	}
 	go func() {
-		if err := s.srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := s.srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			s.logger.Error("admin server failed", "error", err)
 		}
 	}()
-	s.logger.Info("admin listener started", "listen", s.cfg.Listen)
+	s.logger.Info("admin listener started", "listen", ln.Addr().String())
 	return nil
 }
 func (s *Server) Close(timeout time.Duration) error {

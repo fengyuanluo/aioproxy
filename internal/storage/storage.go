@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aioproxy/aioproxy/internal/core"
@@ -17,6 +18,7 @@ const StateVersion = 1
 type Store struct {
 	dataDir   string
 	retention int
+	mu        sync.Mutex
 }
 
 func New(dataDir string, retention int) *Store {
@@ -61,6 +63,8 @@ func (s *Store) LoadPool() ([]core.Candidate, error) {
 }
 
 func (s *Store) SavePool(candidates []core.Candidate) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := os.MkdirAll(s.dataDir, 0o755); err != nil {
 		return err
 	}
@@ -69,6 +73,8 @@ func (s *Store) SavePool(candidates []core.Candidate) error {
 }
 
 func (s *Store) SaveSnapshot(source string, report core.ImportReport, candidates []core.Candidate) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	safe := safeName(source)
 	dir := filepath.Join(s.dataDir, "snapshots", safe)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -123,15 +129,37 @@ func writeJSONAtomic(path string, v any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(b); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
 }
 
 func safeName(s string) string {

@@ -10,6 +10,7 @@ type Pool struct {
 	mu        sync.RWMutex
 	items     map[string]Candidate
 	dialers   map[string]CandidateDialer
+	order     []string
 	rr        int
 	updatedAt time.Time
 }
@@ -22,8 +23,14 @@ func (p *Pool) Replace(candidates []Candidate) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.items = map[string]Candidate{}
+	p.dialers = map[string]CandidateDialer{}
+	p.order = nil
+	p.rr = 0
 	for _, c := range candidates {
 		c.Normalize()
+		if _, exists := p.items[c.Fingerprint]; !exists {
+			p.order = append(p.order, c.Fingerprint)
+		}
 		p.items[c.Fingerprint] = c
 	}
 	p.updatedAt = time.Now()
@@ -38,8 +45,12 @@ func (p *Pool) AddValidated(candidates []Candidate, dialers map[string]Candidate
 		c.Status = StatusAvailable
 		c.FailureCount = 0
 		c.LastError = ""
-		if existing, ok := p.items[c.Fingerprint]; ok && !existing.CreatedAt.IsZero() {
-			c.CreatedAt = existing.CreatedAt
+		if existing, ok := p.items[c.Fingerprint]; ok {
+			if !existing.CreatedAt.IsZero() {
+				c.CreatedAt = existing.CreatedAt
+			}
+		} else {
+			p.order = append(p.order, c.Fingerprint)
 		}
 		c.UpdatedAt = time.Now()
 		p.items[c.Fingerprint] = c
@@ -70,8 +81,10 @@ func (p *Pool) List() []Candidate {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	out := make([]Candidate, 0, len(p.items))
-	for _, c := range p.items {
-		out = append(out, c)
+	for _, fp := range p.order {
+		if c, ok := p.items[fp]; ok {
+			out = append(out, c)
+		}
 	}
 	return out
 }
@@ -80,8 +93,8 @@ func (p *Pool) Available() []Candidate {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	out := make([]Candidate, 0, len(p.items))
-	for _, c := range p.items {
-		if c.Status == StatusAvailable {
+	for _, fp := range p.order {
+		if c, ok := p.items[fp]; ok && c.Status == StatusAvailable {
 			out = append(out, c)
 		}
 	}
@@ -102,6 +115,13 @@ func (p *Pool) Get(fingerprint string) (Candidate, bool) {
 	return c, ok
 }
 
+func (p *Pool) GetAvailable(fingerprint string) (Candidate, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	c, ok := p.items[fingerprint]
+	return c, ok && c.Status == StatusAvailable
+}
+
 func (p *Pool) Count() (total, available int) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -117,19 +137,24 @@ func (p *Pool) Count() (total, available int) {
 func (p *Pool) Pick(policy string) (Candidate, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if policy == "round_robin" {
+		for attempts := 0; attempts < len(p.order); attempts++ {
+			fp := p.order[p.rr%len(p.order)]
+			p.rr++
+			if c, ok := p.items[fp]; ok && c.Status == StatusAvailable {
+				return c, true
+			}
+		}
+		return Candidate{}, false
+	}
 	available := make([]Candidate, 0, len(p.items))
-	for _, c := range p.items {
-		if c.Status == StatusAvailable {
+	for _, fp := range p.order {
+		if c, ok := p.items[fp]; ok && c.Status == StatusAvailable {
 			available = append(available, c)
 		}
 	}
 	if len(available) == 0 {
 		return Candidate{}, false
-	}
-	if policy == "round_robin" {
-		c := available[p.rr%len(available)]
-		p.rr++
-		return c, true
 	}
 	return available[rand.Intn(len(available))], true
 }

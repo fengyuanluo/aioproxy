@@ -41,3 +41,18 @@ func TestBuildSingleHTTPOutbound(t *testing.T) {
 	}
 	_ = b.Close()
 }
+
+func TestUnsupportedTUICAndNaiveAreSkippedBeforeBuild(t *testing.T) {
+	data := []byte("outbounds:\n  - type: tuic\n    tag: t1\n    server: 127.0.0.1\n    server_port: 443\n  - type: naive\n    tag: n1\n    server: 127.0.0.1\n    server_port: 443\n")
+	rep := &core.ImportReport{SkipReasons: map[string]int{}}
+	obs, err := parseToOutbounds(data, rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(obs) != 0 {
+		t.Fatalf("outbounds=%d want=0", len(obs))
+	}
+	if rep.SkipReasons["unsupported_tuic"] != 1 || rep.SkipReasons["unsupported_naive"] != 1 {
+		t.Fatalf("skip reasons=%v", rep.SkipReasons)
+	}
+}

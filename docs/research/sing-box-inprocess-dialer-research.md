@@ -25,18 +25,15 @@ Per-node in-process dialer is feasible at the sing-box core API level. The main 
 
 ## Subscription samples checked
 
-User-provided samples:
+User-provided samples were inspected locally and are intentionally redacted here.
 
-- `http://my.599520.xyz:8199/all.yaml`
-- `http://my.599520.xyz:8199/base64.txt`
-
-DNS/cache note: the host resolved only to IPv6 (`2409:8a50:542b:d8e0::1000`) in this environment. `curl -4` failed. Fetching by IPv6 literal with `Host: my.599520.xyz:8199` succeeded.
+DNS/cache note: the sample host resolved only to IPv6 in this environment. IPv4 fetch failed; fetching by IPv6 literal with the matching Host header succeeded.
 
 Observed sample structure, redacted:
 
-- `all.yaml`: Clash-like YAML with only top-level `proxies`; 1115 proxy entries.
-- `all.yaml` proxy type counts: `ss=785`, `vless=149`, `http=100`, `hysteria2=39`, `vmess=23`, `trojan=16`, `socks5=1`, `mieru=1`, `hysteria=1`.
-- `base64.txt`: base64-encoded share-link list; 1014 decoded non-empty lines.
-- `base64.txt` scheme counts: `ss=785`, `vless=149`, `hysteria2=39`, `vmess=23`, `trojan=16`, `socks=1`, `hysteria=1`.
+- `clash-like sample`: Clash-like YAML with only top-level `proxies`; 1115 proxy entries.
+- `clash-like sample` proxy type counts: `ss=785`, `vless=149`, `http=100`, `hysteria2=39`, `vmess=23`, `trojan=16`, `socks5=1`, `mieru=1`, `hysteria=1`.
+- `base64 share-link sample`: base64-encoded share-link list; 1014 decoded non-empty lines.
+- `base64 share-link sample` scheme counts: `ss=785`, `vless=149`, `hysteria2=39`, `vmess=23`, `trojan=16`, `socks=1`, `hysteria=1`.
 
 Implication: v1 option C requires both Clash-like YAML proxy conversion and base64/share-link conversion. It also requires an unsupported-type policy for types such as `mieru` unless an additional implementation dependency is accepted.

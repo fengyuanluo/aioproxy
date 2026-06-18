@@ -3,8 +3,12 @@ package fpl
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -27,11 +31,11 @@ func (p *Plugin) RefreshInterval() time.Duration { return p.cfg.RefreshInterval.
 
 func (p *Plugin) Refresh(ctx context.Context) core.PluginResult {
 	started := time.Now()
-	report := core.ImportReport{Plugin: p.Name(), Source: p.cfg.URL, StartedAt: started, SkipReasons: map[string]int{}}
 	url := p.cfg.URL
 	if url == "" {
 		url = config.DefaultFPLURL
 	}
+	report := core.ImportReport{Plugin: p.Name(), Source: sourceLabel(url), StartedAt: started, SkipReasons: map[string]int{}}
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	resp, err := p.client.Do(req)
 	if err != nil {
@@ -85,4 +89,20 @@ func parse(r io.Reader, report *core.ImportReport) []core.Candidate {
 		}
 	}
 	return out
+}
+
+func sourceLabel(raw string) string {
+	if raw == "" || raw == config.DefaultFPLURL {
+		return "default"
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "custom-" + shortHash(raw)
+	}
+	return fmt.Sprintf("url-%s-%s", u.Host, shortHash(raw))
+}
+
+func shortHash(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])[:12]
 }

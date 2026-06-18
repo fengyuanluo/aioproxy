@@ -16,3 +16,15 @@ func TestParseFPL(t *testing.T) {
 		t.Fatalf("skip=%v", rep.SkipReasons)
 	}
 }
+
+func TestSourceLabelDoesNotExposeURLCredentials(t *testing.T) {
+	label := sourceLabel("http://sample-user:sample-pass@proxy-source.example.invalid:18083/list.txt?sample-token=redacted")
+	for _, forbidden := range []string{"sample-user", "sample-pass", "sample-token", "redacted", "list.txt"} {
+		if strings.Contains(label, forbidden) {
+			t.Fatalf("label %q contains forbidden substring %q", label, forbidden)
+		}
+	}
+	if !strings.HasPrefix(label, "url-proxy-source.example.invalid:18083-") {
+		t.Fatalf("unexpected label %q", label)
+	}
+}
