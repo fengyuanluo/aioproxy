@@ -1,0 +1,104 @@
+# AIOPROXY v1 example configuration. Copy this file to config.yaml before editing.
+server:
+  # Mixed HTTP/SOCKS5 proxy listener. Default loopback avoids accidental network exposure.
+  listen: "127.0.0.1:1080"
+
+admin:
+  # Read-only Admin API listener. Loopback does not require token.
+  listen: "127.0.0.1:1081"
+  # Required if admin.listen is changed to a non-loopback address.
+  token: ""
+
+auth:
+  # Enable username/password authentication for the proxy listener.
+  enabled: true
+  # Single static credential. The credential part must not contain '-'.
+  username: "aio"
+  # Change this before exposing server.listen beyond loopback.
+  password: "change-me"
+
+scheduler:
+  # Non-session scheduling policy: random or round_robin.
+  policy: "random"
+
+session:
+  # Sliding TTL used by usernames like aio-job001.
+  default_ttl: "30m"
+  # Requested TTLs above this value are clamped.
+  max_ttl: "24h"
+
+validation:
+  # HTTP URL used for update-time proxy validation.
+  url: "http://www.gstatic.com/generate_204"
+  # HTTP status codes considered successful validation.
+  success_status: [204, 200, 301, 302]
+  # Per-proxy validation timeout.
+  timeout: "8s"
+  # Maximum concurrent validations during refresh.
+  concurrency: 100
+  # Default false: validation URL is HTTP, so TLS verification is not exercised by default.
+  tls_insecure: false
+  # For lab/smoke tests only. Keep false for normal operation.
+  skip_validation: false
+
+runtime_failure:
+  # Runtime errors before candidate eviction from scheduling.
+  max_failures: 3
+  # Early zero-byte upstream closure window counted as proxy failure.
+  early_failure_window: "3s"
+
+storage:
+  # Relative data directory for persisted pool and snapshots.
+  data_dir: "./data"
+  # Per-source snapshot retention.
+  snapshot_retention: 7
+
+logging:
+  # File log path. Debug logs may contain secrets and raw nodes.
+  file: "./logs/aioproxy.log"
+  # debug/info/warn/error.
+  level: "info"
+  # text or json.
+  format: "text"
+  rotation:
+    # Rotate after this size.
+    max_size: "100MB"
+    # Number of old files to retain.
+    max_backups: 7
+    # Optional age retention in days, 0 disables age pruning.
+    max_age_days: 0
+    # Compress rotated logs.
+    compress: true
+
+lifecycle:
+  # Grace period for existing connections during SIGINT/SIGTERM shutdown.
+  grace_period: "15s"
+
+refresh:
+  # Jitter ratio for scheduled refreshes after startup; 0.1 means +/-10%.
+  jitter_ratio: 0.1
+
+plugins:
+  # FPL is enabled by default in the example. Omit url to use built-in all-list URL.
+  fpl:
+    # url: "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/all/data.txt"
+    refresh_interval: "6h"
+
+  # FOFA activates only when key is non-empty.
+  fofa:
+    base_url: "http://fofa.icu"
+    key: ""
+    size: 100
+    refresh_interval: "6h"
+    # Default queries are used when this list is empty.
+    queries: []
+
+  # sing-box activates only when sources is non-empty.
+  singbox:
+    refresh_interval: "1h"
+    sources: []
+    # Example:
+    # sources:
+    #   - name: "mihomo"
+    #     type: "url"
+    #     url: "https://example.invalid/sub.yaml"

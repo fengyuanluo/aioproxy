@@ -6,7 +6,7 @@
 # Local configs and secrets
 .env
 .env.*
-config.yaml
+/config.yaml
 *.local.yaml
 secrets*.yaml
 
