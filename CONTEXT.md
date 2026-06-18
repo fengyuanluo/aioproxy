@@ -108,3 +108,6 @@ A service lifecycle behavior where AIOPROXY stops accepting new work after a shu
 
 ### No Active Plugin State
 A service state where no configured proxy-source plugin is active, leaving AIOPROXY without a live source for new proxy candidates.
+
+### Refresh Jitter
+A small randomized time offset applied to scheduled plugin refreshes after startup so configured sources do not all refresh at the exact same moment.
