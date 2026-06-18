@@ -111,3 +111,6 @@ A service state where no configured proxy-source plugin is active, leaving AIOPR
 
 ### Refresh Jitter
 A small randomized time offset applied to scheduled plugin refreshes after startup so configured sources do not all refresh at the exact same moment.
+
+### Persistent State Compatibility
+A lifecycle expectation that persisted candidate-pool and snapshot files carry a schema version and are protected across v1 upgrades by compatible reads when possible or automatic backup and rebuild when incompatible.
