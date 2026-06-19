@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -443,6 +444,10 @@ func validListen(addr string) error {
 	}
 	if port == "" {
 		return errors.New("missing port")
+	}
+	portNum, err := strconv.Atoi(port)
+	if err != nil || portNum < 0 || portNum > 65535 {
+		return fmt.Errorf("invalid port %q", port)
 	}
 	if host == "" {
 		return nil

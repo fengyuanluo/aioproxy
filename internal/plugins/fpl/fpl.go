@@ -36,7 +36,12 @@ func (p *Plugin) Refresh(ctx context.Context) core.PluginResult {
 		url = config.DefaultFPLURL
 	}
 	report := core.ImportReport{Plugin: p.Name(), Source: sourceLabel(url), StartedAt: started, SkipReasons: map[string]int{}}
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		report.Error = err.Error()
+		report.FinishedAt = time.Now()
+		return core.PluginResult{Reports: []core.ImportReport{report}}
+	}
 	resp, err := p.client.Do(req)
 	if err != nil {
 		report.Error = err.Error()

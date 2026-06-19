@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/aioproxy/aioproxy/internal/config"
 	"github.com/aioproxy/aioproxy/internal/core"
 )
 
@@ -54,5 +55,19 @@ func TestUnsupportedTUICAndNaiveAreSkippedBeforeBuild(t *testing.T) {
 	}
 	if rep.SkipReasons["unsupported_tuic"] != 1 || rep.SkipReasons["unsupported_naive"] != 1 {
 		t.Fatalf("skip reasons=%v", rep.SkipReasons)
+	}
+}
+
+func TestRefreshInvalidURLReturnsReportError(t *testing.T) {
+	p := New(config.SingBoxConfig{Sources: []config.SingBoxSourceConfig{{Name: "bad", Type: "url", URL: "http://%zz"}}})
+	res := p.Refresh(context.Background())
+	if len(res.Reports) != 1 {
+		t.Fatalf("reports=%d", len(res.Reports))
+	}
+	if res.Reports[0].Error == "" {
+		t.Fatalf("expected report error, got %#v", res.Reports[0])
+	}
+	if len(res.Candidates) != 0 {
+		t.Fatalf("candidates=%d", len(res.Candidates))
 	}
 }

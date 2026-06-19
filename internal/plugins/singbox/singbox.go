@@ -148,7 +148,10 @@ func (p *Plugin) closeBoxes() {
 func (p *Plugin) readSource(ctx context.Context, src config.SingBoxSourceConfig) ([]byte, error) {
 	switch src.Type {
 	case "url":
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, src.URL, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, src.URL, nil)
+		if err != nil {
+			return nil, err
+		}
 		resp, err := p.client.Do(req)
 		if err != nil {
 			return nil, err
