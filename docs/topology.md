@@ -6,7 +6,8 @@
 flowchart LR
   Client[HTTP/SOCKS5 Client] --> Mixed[Mixed Proxy Listener]
   Mixed --> Auth[Auth + Session Parser]
-  Auth --> Scheduler[Scheduler + Session Binding]
+  Auth --> Route[Plugin/Region Route Filter]
+  Route --> Scheduler[Scheduler + Session Binding]
   Scheduler --> Pool[Candidate Pool]
   Pool --> HTTP[HTTP Upstream]
   Pool --> SOCKS[SOCKS5 Upstream]
@@ -30,19 +31,22 @@ sequenceDiagram
   participant Store
   Plugin->>Plugin: fetch/parse source
   Plugin->>Validator: Proxy candidates
-  Validator->>Validator: HTTP generate_204 validation
+  Validator->>Validator: http_status or ip_api_country validation
   Validator->>Pool: add validated candidates
   Validator->>Store: save snapshot + pool
 ```
+
+说明：当 `validation.strategy=ip_api_country` 时，Validator 会通过候选自身请求 ip-api；只有成功返回 `countryCode` 的候选才会入池，并把国家信息写入 candidate metadata。
 
 ## 请求调度
 
 ```mermaid
 flowchart TD
   Req[Client Request] --> Parse[Protocol + Auth]
-  Parse --> Sess{Session ID?}
-  Sess -- yes --> Bind[Find/Rebind Candidate]
-  Sess -- no --> Policy[random/round_robin]
+  Parse --> Filter[plugin / region filter]
+  Filter --> Sess{Session ID?}
+  Sess -- yes --> Bind[Find/Rebind Candidate in Filtered Pool]
+  Sess -- no --> Policy[random/round_robin in Filtered Pool]
   Bind --> Dial[Dial Upstream]
   Policy --> Dial
   Dial --> Tunnel[Bidirectional Tunnel]
@@ -50,6 +54,8 @@ flowchart TD
   Fail -- yes --> Evict[Failure count / eviction]
   Fail -- no --> OK[Keep candidate available]
 ```
+
+说明：若 `plugin` / `region` 过滤后没有可用候选，请求直接 fail fast，不回退全局池。
 
 ## sing-box 节点桥接
 
@@ -100,10 +106,10 @@ flowchart LR
   Health --> Pool[Pool Counts]
   Health --> PluginState[Plugin Degradation]
   Plugins --> Reports[Import Reports]
-  PoolView --> Basic[Basic Candidate Info]
+  PoolView --> Basic[Basic Candidate Info + Country Metadata]
 ```
 
-说明：Admin API 不提供刷新/删除/修改；只返回基础运行信息，不返回 FOFA key、代理密码、完整订阅 URL 或 raw node。
+说明：Admin API 不提供刷新/删除/修改；只返回基础运行信息，不返回 FOFA key、代理密码、完整订阅 URL 或 raw node。启用 `ip_api_country` 后，`/pool` 可看到国家码与国家名。
 
 ## 发布构建流
 
