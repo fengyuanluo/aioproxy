@@ -2,11 +2,14 @@ package validation
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/aioproxy/aioproxy/internal/config"
 	"github.com/aioproxy/aioproxy/internal/core"
+	"github.com/aioproxy/aioproxy/internal/proxy"
 )
 
 func TestValidateStopsDispatchWhenContextCanceled(t *testing.T) {
@@ -24,5 +27,27 @@ func TestValidateStopsDispatchWhenContextCanceled(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
 		t.Fatalf("canceled validation took too long: %v", elapsed)
+	}
+}
+
+func TestValidateCandidateIPAPICountry(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"success","country":"United States","countryCode":"US","query":"1.2.3.4"}`))
+	}))
+	defer ts.Close()
+	v := New(config.ValidationConfig{
+		Strategy:    config.ValidationStrategyIPAPICountry,
+		URL:         ts.URL,
+		Timeout:     config.Duration{Duration: time.Second},
+		Concurrency: 1,
+	})
+	cand := core.Candidate{Protocol: core.ProtocolSingBox, Source: "fofa"}
+	got, err := v.ValidateCandidate(context.Background(), cand, proxy.DirectDialer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["country_code"] != "US" || got.Metadata["country"] != "United States" || got.Metadata["query_ip"] != "1.2.3.4" {
+		t.Fatalf("unexpected metadata: %+v", got.Metadata)
 	}
 }

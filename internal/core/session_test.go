@@ -31,6 +31,39 @@ func TestParseSessionUsername(t *testing.T) {
 	}
 }
 
+func TestParseStructuredUsername(t *testing.T) {
+	def := 30 * time.Minute
+	max := time.Hour
+	got, ok := ParseSessionUsername("aio~plugin=fofa~region=us~session=job-001~ttl=99h", "aio", def, max)
+	if !ok {
+		t.Fatal("expected structured username to parse")
+	}
+	if got.Plugin != "fofa" || got.Region != "US" || got.SessionID != "job-001" || got.TTL != max {
+		t.Fatalf("unexpected parse result: %+v", got)
+	}
+	got, ok = ParseSessionUsername("aio~ttl=30m~session=job-002", "aio", def, max)
+	if !ok || got.SessionID != "job-002" || got.TTL != 30*time.Minute {
+		t.Fatalf("expected ttl-before-session ordering support, got %+v ok=%v", got, ok)
+	}
+}
+
+func TestParseStructuredUsernameRejectsInvalid(t *testing.T) {
+	def := 30 * time.Minute
+	max := time.Hour
+	cases := []string{
+		"aio~plugin=",
+		"aio~unknown=x",
+		"aio~ttl=30m",
+		"aio~plugin=fofa~plugin=fpl",
+		"bob~plugin=fofa",
+	}
+	for _, in := range cases {
+		if _, ok := ParseSessionUsername(in, "aio", def, max); ok {
+			t.Fatalf("expected %q to fail", in)
+		}
+	}
+}
+
 func TestSessionConcurrentFirstBindPinned(t *testing.T) {
 	pool := NewPool()
 	pool.AddValidated([]Candidate{
@@ -121,5 +154,24 @@ func TestSessionPickSweepsExpired(t *testing.T) {
 	}
 	if got := len(sm.bindings); got != 1 {
 		t.Fatalf("expired sessions should be swept during pick, got %d bindings", got)
+	}
+}
+
+func TestSessionScopedBindingsDoNotCrossPlugin(t *testing.T) {
+	pool := NewPool()
+	pool.AddValidated([]Candidate{
+		{Protocol: ProtocolHTTP, Host: "1.1.1.1", Port: 80, Source: "fofa"},
+		{Protocol: ProtocolHTTP, Host: "2.2.2.2", Port: 80, Source: "fpl"},
+	}, nil)
+	sm := NewSessionManager(time.Minute, time.Hour)
+	fofaInfo := SessionInfo{Credential: "aio", SessionID: "job-001", TTL: time.Minute, Plugin: "fofa"}
+	fplInfo := SessionInfo{Credential: "aio", SessionID: "job-001", TTL: time.Minute, Plugin: "fpl"}
+	first, ok := sm.Pick(fofaInfo, pool, "random")
+	if !ok || first.Source != "fofa" {
+		t.Fatalf("expected fofa candidate, got %+v ok=%v", first, ok)
+	}
+	second, ok := sm.Pick(fplInfo, pool, "random")
+	if !ok || second.Source != "fpl" {
+		t.Fatalf("expected fpl candidate, got %+v ok=%v", second, ok)
 	}
 }

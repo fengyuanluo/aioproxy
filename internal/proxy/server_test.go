@@ -111,6 +111,87 @@ func TestProxy300Concurrent(t *testing.T) {
 	}
 }
 
+func TestHTTPProxyUsernameRouteByPluginAndRegion(t *testing.T) {
+	fofaOrigin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "fofa") }))
+	defer fofaOrigin.Close()
+	usOrigin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "us") }))
+	defer usOrigin.Close()
+	fofaURL, _ := url.Parse(fofaOrigin.URL)
+	usURL, _ := url.Parse(usOrigin.URL)
+	fofaHost, fofaPortStr, _ := net.SplitHostPort(fofaURL.Host)
+	usHost, usPortStr, _ := net.SplitHostPort(usURL.Host)
+	fofaPort, _ := strconv.Atoi(fofaPortStr)
+	usPort, _ := strconv.Atoi(usPortStr)
+
+	pool := core.NewPool()
+	pool.AddValidated([]core.Candidate{
+		{Protocol: core.ProtocolSingBox, Host: fofaHost, Port: fofaPort, Source: "fofa", Metadata: map[string]string{"country_code": "JP", "tag": "fofa-jp"}},
+		{Protocol: core.ProtocolSingBox, Host: usHost, Port: usPort, Source: "singbox", Metadata: map[string]string{"country_code": "US", "tag": "singbox-us"}},
+	}, nil)
+	list := pool.List()
+	pool.RegisterDialer(list[0].Fingerprint, fixedTargetDialer{target: mustHostPort(t, fofaOrigin.URL)})
+	pool.RegisterDialer(list[1].Fingerprint, fixedTargetDialer{target: mustHostPort(t, usOrigin.URL)})
+
+	cfg := config.Config{}
+	cfg.ApplyDefaults()
+	cfg.Server.Listen = "127.0.0.1:0"
+	cfg.Auth.Enabled = true
+	cfg.RuntimeFailure.MaxFailures = 3
+	cfg.RuntimeFailure.EarlyFailureWindow.Duration = time.Second
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv := NewServer(cfg, pool, core.NewSessionManager(time.Minute, time.Hour), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := srv.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	body := httpViaProxy(t, srv.Addr(), "aio~plugin=fofa", "change-me", "http://example.test/")
+	if body != "fofa" {
+		t.Fatalf("plugin route body=%q", body)
+	}
+	body = httpViaProxy(t, srv.Addr(), "aio~region=US", "change-me", "http://example.test/")
+	if body != "us" {
+		t.Fatalf("region route body=%q", body)
+	}
+}
+
+type fixedTargetDialer struct{ target string }
+
+func (d fixedTargetDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	var nd net.Dialer
+	return nd.DialContext(ctx, network, d.target)
+}
+
+func mustHostPort(t *testing.T, rawURL string) string {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u.Host
+}
+
+func httpViaProxy(t *testing.T, proxyAddr, user, pass, targetURL string) string {
+	t.Helper()
+	proxyURL, err := url.Parse("http://" + url.UserPassword(user, pass).String() + "@" + proxyAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}, Timeout: 5 * time.Second}
+	resp, err := client.Get(targetURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}
+
 func socksGet(proxyAddr, user, pass, target string) error {
 	conn, err := net.DialTimeout("tcp", proxyAddr, 5*time.Second)
 	if err != nil {

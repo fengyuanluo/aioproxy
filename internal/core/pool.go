@@ -135,13 +135,17 @@ func (p *Pool) Count() (total, available int) {
 }
 
 func (p *Pool) Pick(policy string) (Candidate, bool) {
+	return p.PickMatching(policy, func(Candidate) bool { return true })
+}
+
+func (p *Pool) PickMatching(policy string, match func(Candidate) bool) (Candidate, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if policy == "round_robin" {
 		for attempts := 0; attempts < len(p.order); attempts++ {
 			fp := p.order[p.rr%len(p.order)]
 			p.rr++
-			if c, ok := p.items[fp]; ok && c.Status == StatusAvailable {
+			if c, ok := p.items[fp]; ok && c.Status == StatusAvailable && match(c) {
 				return c, true
 			}
 		}
@@ -149,7 +153,7 @@ func (p *Pool) Pick(policy string) (Candidate, bool) {
 	}
 	available := make([]Candidate, 0, len(p.items))
 	for _, fp := range p.order {
-		if c, ok := p.items[fp]; ok && c.Status == StatusAvailable {
+		if c, ok := p.items[fp]; ok && c.Status == StatusAvailable && match(c) {
 			available = append(available, c)
 		}
 	}

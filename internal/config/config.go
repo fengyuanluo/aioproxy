@@ -13,18 +13,21 @@ import (
 )
 
 const (
-	DefaultProxyListen      = "127.0.0.1:1080"
-	DefaultAdminListen      = "127.0.0.1:1081"
-	DefaultFPLURL           = "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/all/data.txt"
-	DefaultValidationURL    = "http://www.gstatic.com/generate_204"
-	DefaultSchedulerPolicy  = "random"
-	DefaultCredentialUser   = "aio"
-	DefaultCredentialPass   = "change-me"
-	DefaultSnapshotRetain   = 7
-	DefaultFOFABaseURL      = "http://fofa.icu"
-	DefaultFOFASize         = 100
-	DefaultFOFAFields       = "ip,port,protocol,host"
-	DefaultGracefulShutdown = 15 * time.Second
+	DefaultProxyListen             = "127.0.0.1:1080"
+	DefaultAdminListen             = "127.0.0.1:1081"
+	DefaultFPLURL                  = "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/all/data.txt"
+	DefaultValidationURL           = "http://www.gstatic.com/generate_204"
+	DefaultIPAPICountryURL         = "http://ip-api.com/json/?fields=status,message,country,countryCode,query"
+	DefaultSchedulerPolicy         = "random"
+	DefaultCredentialUser          = "aio"
+	DefaultCredentialPass          = "change-me"
+	DefaultSnapshotRetain          = 7
+	DefaultFOFABaseURL             = "http://fofa.icu"
+	DefaultFOFASize                = 100
+	DefaultFOFAFields              = "ip,port,protocol,host"
+	DefaultGracefulShutdown        = 15 * time.Second
+	ValidationStrategyHTTPStatus   = "http_status"
+	ValidationStrategyIPAPICountry = "ip_api_country"
 )
 
 type Duration struct{ time.Duration }
@@ -153,6 +156,7 @@ type SessionConfig struct {
 }
 
 type ValidationConfig struct {
+	Strategy       string   `yaml:"strategy"`
 	URL            string   `yaml:"url"`
 	SuccessStatus  []int    `yaml:"success_status"`
 	Timeout        Duration `yaml:"timeout"`
@@ -270,8 +274,15 @@ func (c *Config) ApplyDefaults() {
 	if c.Session.MaxTTL.Duration == 0 {
 		c.Session.MaxTTL.Duration = 24 * time.Hour
 	}
+	if c.Validation.Strategy == "" {
+		c.Validation.Strategy = ValidationStrategyHTTPStatus
+	}
 	if c.Validation.URL == "" {
-		c.Validation.URL = DefaultValidationURL
+		if c.Validation.Strategy == ValidationStrategyIPAPICountry {
+			c.Validation.URL = DefaultIPAPICountryURL
+		} else {
+			c.Validation.URL = DefaultValidationURL
+		}
 	}
 	if len(c.Validation.SuccessStatus) == 0 {
 		c.Validation.SuccessStatus = []int{204, 200, 301, 302}
@@ -387,6 +398,9 @@ func (c *Config) Check() CheckResult {
 	}
 	if c.Validation.Timeout.Duration <= 0 {
 		r.Errors = append(r.Errors, "validation.timeout must be positive")
+	}
+	if c.Validation.Strategy != ValidationStrategyHTTPStatus && c.Validation.Strategy != ValidationStrategyIPAPICountry {
+		r.Errors = append(r.Errors, "validation.strategy must be http_status or ip_api_country")
 	}
 	if c.Validation.Concurrency <= 0 {
 		r.Errors = append(r.Errors, "validation.concurrency must be positive")

@@ -28,12 +28,15 @@ AIOPROXY 只读取 YAML 配置，不做环境变量展开。推荐从 `examples/
 
 ## validation
 
+- `validation.strategy`：验活策略。`http_status` 为传统 HTTP 状态码验活；`ip_api_country` 为通过代理请求 ip-api，同时拿存活结果和 `countryCode`。
 - `validation.url`：更新时验活 URL。默认 HTTP `generate_204`，不验证 TLS 行为。
 - `validation.success_status`：验活成功 HTTP 状态码列表。
 - `validation.timeout`：单个候选验活超时。
 - `validation.concurrency`：刷新时并发验活 worker 数。
 - `validation.tls_insecure`：HTTPS 验活时是否跳过 TLS 校验。
 - `validation.skip_validation`：仅用于本地实验/测试；正常运行应为 `false`。
+
+当 `validation.strategy=ip_api_country` 时，建议使用 `http://ip-api.com/json/?fields=status,message,country,countryCode,query`。该模式下返回 `countryCode` 的候选才会入池，后续用户名可按国家码路由。
 
 ## runtime_failure
 

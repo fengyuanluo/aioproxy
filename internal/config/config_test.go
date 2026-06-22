@@ -85,3 +85,23 @@ func TestCheckAllowsZeroPort(t *testing.T) {
 		t.Fatalf("expected zero port to be allowed, got errors: %v", r.Errors)
 	}
 }
+
+func TestCheckRejectsUnknownValidationStrategy(t *testing.T) {
+	c := Config{}
+	c.ApplyDefaults()
+	c.Validation.Strategy = "bad"
+	r := c.Check()
+	if r.OK() {
+		t.Fatal("expected invalid validation strategy to fail")
+	}
+	found := false
+	for _, err := range r.Errors {
+		if strings.Contains(err, "validation.strategy") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("unexpected errors: %v", r.Errors)
+	}
+}

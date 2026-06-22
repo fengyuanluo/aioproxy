@@ -39,6 +39,16 @@ type Candidate struct {
 	UpdatedAt      time.Time         `json:"updated_at"`
 }
 
+func (c Candidate) MatchesRoute(plugin, region string) bool {
+	if plugin != "" && !strings.EqualFold(c.Source, plugin) {
+		return false
+	}
+	if region != "" && !strings.EqualFold(strings.TrimSpace(c.Metadata["country_code"]), region) {
+		return false
+	}
+	return true
+}
+
 func (c *Candidate) Normalize() {
 	c.Protocol = strings.ToLower(strings.TrimSpace(c.Protocol))
 	c.Host = strings.TrimSpace(c.Host)

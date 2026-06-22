@@ -28,6 +28,8 @@ session:
   max_ttl: "24h"
 
 validation:
+  # Validation strategy: http_status or ip_api_country.
+  strategy: "http_status"
   # HTTP URL used for update-time proxy validation.
   url: "http://www.gstatic.com/generate_204"
   # HTTP status codes considered successful validation.
@@ -40,6 +42,9 @@ validation:
   tls_insecure: false
   # For lab/smoke tests only. Keep false for normal operation.
   skip_validation: false
+  # Region-routing example:
+  # strategy: "ip_api_country"
+  # url: "http://ip-api.com/json/?fields=status,message,country,countryCode,query"
 
 runtime_failure:
   # Runtime errors before candidate eviction from scheduling.

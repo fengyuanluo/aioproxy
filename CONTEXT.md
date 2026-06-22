@@ -67,6 +67,15 @@ The configured scheduling behavior used when a request does not include an expli
 ### Session Username Expression
 A proxy authentication username that encodes an explicit session using `<credential>-<session>` or `<credential>-<session>-<ttl>`. The credential part cannot contain `-`; the session part may contain `-`; a trailing duration token is treated as session lifetime.
 
+### Structured Route Username
+A proxy authentication username that uses `~key=value` segments such as `plugin`, `region`, `session`, and `ttl` to constrain candidate selection before scheduling.
+
+### Plugin Route
+A username-scoped filter that limits scheduling to candidates emitted by one configured plugin such as `fpl`, `fofa`, or `singbox`.
+
+### Region Route
+A username-scoped filter that limits scheduling to candidates whose validation metadata carries a matching proxy-exit country code.
+
 ### FOFA Source Query
 A configured FOFA search request used by the FOFA plugin to produce proxy candidates. It declares the FOFA query, output protocol, requested fields, and pagination settings.
 

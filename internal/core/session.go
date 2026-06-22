@@ -1,6 +1,7 @@
 package core
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,8 @@ type SessionInfo struct {
 	Credential string
 	SessionID  string
 	TTL        time.Duration
+	Plugin     string
+	Region     string
 }
 
 func NewSessionManager(defaultTTL, maxTTL time.Duration) *SessionManager {
@@ -31,6 +34,9 @@ func NewSessionManager(defaultTTL, maxTTL time.Duration) *SessionManager {
 }
 
 func ParseSessionUsername(username, credential string, defaultTTL, maxTTL time.Duration) (SessionInfo, bool) {
+	if strings.Contains(username, "~") {
+		return ParseStructuredUsername(username, credential, defaultTTL, maxTTL)
+	}
 	if username == credential {
 		return SessionInfo{Credential: credential}, true
 	}
@@ -59,25 +65,88 @@ func ParseSessionUsername(username, credential string, defaultTTL, maxTTL time.D
 	return SessionInfo{Credential: credential, SessionID: sessionID, TTL: ttl}, true
 }
 
-func (m *SessionManager) Pick(info SessionInfo, pool *Pool, policy string) (Candidate, bool) {
-	if info.SessionID == "" {
-		return pool.Pick(policy)
+func ParseStructuredUsername(username, credential string, defaultTTL, maxTTL time.Duration) (SessionInfo, bool) {
+	parts := strings.Split(username, "~")
+	if len(parts) == 0 || parts[0] != credential {
+		return SessionInfo{}, false
 	}
+	info := SessionInfo{Credential: credential}
+	seen := map[string]bool{}
+	var ttlRaw string
+	for _, part := range parts[1:] {
+		if part == "" {
+			return SessionInfo{}, false
+		}
+		kv := strings.SplitN(part, "=", 2)
+		if len(kv) != 2 {
+			return SessionInfo{}, false
+		}
+		key := strings.ToLower(strings.TrimSpace(kv[0]))
+		val := strings.TrimSpace(kv[1])
+		if key == "" || val == "" || seen[key] {
+			return SessionInfo{}, false
+		}
+		seen[key] = true
+		switch key {
+		case "plugin":
+			info.Plugin = strings.ToLower(val)
+		case "region":
+			info.Region = strings.ToUpper(val)
+		case "session":
+			info.SessionID = val
+		case "ttl":
+			ttlRaw = val
+		default:
+			return SessionInfo{}, false
+		}
+	}
+	if ttlRaw != "" {
+		if info.SessionID == "" {
+			return SessionInfo{}, false
+		}
+		ttl, err := time.ParseDuration(ttlRaw)
+		if err != nil {
+			return SessionInfo{}, false
+		}
+		info.TTL = ttl
+	}
+	if info.TTL <= 0 && info.SessionID != "" {
+		info.TTL = defaultTTL
+	}
+	if info.TTL > 0 && maxTTL > 0 && info.TTL > maxTTL {
+		info.TTL = maxTTL
+	}
+	return info, true
+}
+
+func (i SessionInfo) BindingKey() string {
+	if i.SessionID == "" {
+		return ""
+	}
+	return fmt.Sprintf("plugin=%s|region=%s|session=%s", strings.ToLower(i.Plugin), strings.ToUpper(i.Region), i.SessionID)
+}
+
+func (m *SessionManager) Pick(info SessionInfo, pool *Pool, policy string) (Candidate, bool) {
+	match := func(c Candidate) bool { return c.MatchesRoute(info.Plugin, info.Region) }
+	if info.SessionID == "" {
+		return pool.PickMatching(policy, match)
+	}
+	bindingKey := info.BindingKey()
 	now := time.Now()
 	m.mu.Lock()
 	m.sweepExpiredLocked(now, time.Minute)
-	if b, ok := m.bindings[info.SessionID]; ok && now.Before(b.ExpiresAt) {
+	if b, ok := m.bindings[bindingKey]; ok && now.Before(b.ExpiresAt) {
 		c, available := pool.GetAvailable(b.Fingerprint)
-		if !available {
-			delete(m.bindings, info.SessionID)
+		if !available || !match(c) {
+			delete(m.bindings, bindingKey)
 		} else {
 			b.ExpiresAt = now.Add(b.TTL)
-			m.bindings[info.SessionID] = b
+			m.bindings[bindingKey] = b
 			m.mu.Unlock()
 			return c, true
 		}
 	}
-	c, ok := pool.Pick(policy)
+	c, ok := pool.PickMatching(policy, match)
 	if !ok {
 		m.mu.Unlock()
 		return Candidate{}, false
@@ -89,7 +158,7 @@ func (m *SessionManager) Pick(info SessionInfo, pool *Pool, policy string) (Cand
 	if m.maxTTL > 0 && ttl > m.maxTTL {
 		ttl = m.maxTTL
 	}
-	m.bindings[info.SessionID] = sessionBinding{Fingerprint: c.Fingerprint, ExpiresAt: now.Add(ttl), TTL: ttl}
+	m.bindings[bindingKey] = sessionBinding{Fingerprint: c.Fingerprint, ExpiresAt: now.Add(ttl), TTL: ttl}
 	m.mu.Unlock()
 	return c, true
 }

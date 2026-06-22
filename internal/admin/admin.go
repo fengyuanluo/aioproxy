@@ -90,13 +90,13 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) poolView(w http.ResponseWriter, r *http.Request) {
 	type view struct {
-		ID, Fingerprint, Protocol, Host, Source, Name, Status, LastError string
-		Port, FailureCount                                               int
-		LastValidation                                                   time.Time
+		ID, Fingerprint, Protocol, Host, Source, Name, Status, LastError, CountryCode, Country string
+		Port, FailureCount                                                                     int
+		LastValidation                                                                         time.Time
 	}
 	var out []view
 	for _, c := range s.pool.List() {
-		out = append(out, view{c.ID, c.Fingerprint[:16], c.Protocol, c.Host, c.Source, c.Name, c.Status, c.LastError, c.Port, c.FailureCount, c.LastValidation})
+		out = append(out, view{c.ID, c.Fingerprint[:16], c.Protocol, c.Host, c.Source, c.Name, c.Status, c.LastError, c.Metadata["country_code"], c.Metadata["country"], c.Port, c.FailureCount, c.LastValidation})
 	}
 	writeJSON(w, out)
 }
