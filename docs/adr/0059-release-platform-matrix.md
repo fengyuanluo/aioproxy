@@ -4,7 +4,7 @@
 Accepted
 
 ## Context
-AIOPROXY v1 is distributed as multi-platform binaries through GitHub Actions. Docker images are out of scope for v1. The release workflow builds CI artifacts on main pushes and formal release assets on version tags.
+AIOPROXY v1 is distributed as multi-platform binaries through GitHub Actions. Docker images are out of scope for v1. The release workflow builds and publishes a mutable `continuous` prerelease on main pushes and formal stable release assets on version tags.
 
 A product boundary was needed for which operating systems and CPU architectures are included in the v1 binary release matrix.
 

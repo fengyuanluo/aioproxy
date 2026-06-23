@@ -125,4 +125,4 @@ flowchart TD
   Checksums --> GHRelease[GitHub Release Assets]
 ```
 
-说明：main push 产出 CI artifacts；`v*` tag 才创建正式 GitHub Release。v1 发布 Linux/macOS/Windows 的 amd64 与 arm64 二进制包。
+说明：main push 通过后自动更新 `continuous` prerelease；`v*` tag 创建稳定 GitHub Release。v1 发布 Linux/macOS/Windows 的 amd64 与 arm64 二进制包，发布过程不依赖 Actions artifacts 作为中转。

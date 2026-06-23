@@ -1,4 +1,4 @@
-# ADR 0058: Build artifacts on main push and publish releases on tags
+# ADR 0058: Avoid Actions artifacts and publish releases from trusted pushes
 
 ## Status
 Accepted
@@ -11,15 +11,15 @@ A product boundary was needed for whether every main push should create download
 ## Decision
 AIOPROXY v1 uses a hybrid GitHub Actions release model.
 
-Pushes to the main branch build and upload multi-platform binary artifacts as CI artifacts, but do not create GitHub Releases.
+Pushes to the main branch validate and rebuild the multi-platform binaries, then update the mutable `continuous` prerelease. The workflow does not use Actions artifacts as a release handoff layer.
 
 Version tags trigger the formal release workflow. Tag-triggered releases build multi-platform binaries, package archives, generate checksums, create a GitHub Release, and upload release assets.
 
 Pull requests run validation such as tests and builds for review, but do not create formal releases.
 
 ## Consequences
-- Main branch commits produce downloadable CI artifacts for testing and handoff without polluting GitHub Releases.
-- Formal releases remain tied to explicit version tags.
-- Users can distinguish temporary CI artifacts from versioned release assets.
-- Release documentation must explain that CI artifacts are not stable releases and that tagged releases are the official distribution channel.
-- Workflow validation must cover both the continuous build path and the tag release path.
+- Main branch commits produce a downloadable `continuous` prerelease for testing and handoff without polluting the stable release line.
+- Stable releases remain tied to explicit version tags.
+- Users can distinguish the mutable `continuous` prerelease from immutable versioned release assets.
+- Release documentation must explain that `continuous` is the latest main-branch build and that tagged releases are the stable distribution channel.
+- Workflow validation must cover both the main-push continuous release path and the tag release path.
