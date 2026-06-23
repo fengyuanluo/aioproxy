@@ -12,9 +12,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	box "github.com/sagernet/sing-box"
@@ -79,9 +81,11 @@ func minimalSingBoxContext(ctx context.Context) context.Context {
 type Plugin struct {
 	cfg    config.SingBoxConfig
 	client *http.Client
-	mu     sync.Mutex
-	boxes  map[string]interface{ Close() error }
 }
+
+const defaultSingBoxIdleCloseAfter = 30 * time.Second
+
+var freeOSMemoryScheduled atomic.Bool
 
 func New(cfg config.SingBoxConfig) *Plugin {
 	return &Plugin{cfg: cfg, client: &http.Client{Timeout: 60 * time.Second}}
@@ -94,7 +98,6 @@ func (p *Plugin) Refresh(ctx context.Context) core.PluginResult {
 	var all []core.Candidate
 	dialers := map[string]core.CandidateDialer{}
 	var reports []core.ImportReport
-	newBoxes := map[string]interface{ Close() error }{}
 	for _, src := range p.cfg.Sources {
 		started := time.Now()
 		rep := core.ImportReport{Plugin: p.Name(), Source: src.Name, StartedAt: started, SkipReasons: map[string]int{}, Metadata: map[string]string{"type": src.Type}}
@@ -105,12 +108,9 @@ func (p *Plugin) Refresh(ctx context.Context) core.PluginResult {
 			reports = append(reports, rep)
 			continue
 		}
-		cands, ds, boxes, err := p.importContent(ctx, src.Name, content, &rep)
+		cands, ds, err := p.importContent(ctx, src.Name, content, &rep)
 		if err != nil {
 			rep.Error = err.Error()
-		}
-		for fp, b := range boxes {
-			newBoxes[fp] = b
 		}
 		rep.Imported = len(cands)
 		rep.FinishedAt = time.Now()
@@ -120,30 +120,10 @@ func (p *Plugin) Refresh(ctx context.Context) core.PluginResult {
 			dialers[k] = v
 		}
 	}
-	p.mu.Lock()
-	if p.boxes == nil {
-		p.boxes = map[string]interface{ Close() error }{}
-	}
-	for fp, b := range newBoxes {
-		if old := p.boxes[fp]; old != nil {
-			_ = old.Close()
-		}
-		p.boxes[fp] = b
-	}
-	p.mu.Unlock()
 	return core.PluginResult{Candidates: all, Dialers: dialers, Reports: reports}
 }
 
-func (p *Plugin) Close() { p.closeBoxes() }
-func (p *Plugin) closeBoxes() {
-	p.mu.Lock()
-	boxes := p.boxes
-	p.boxes = nil
-	p.mu.Unlock()
-	for _, b := range boxes {
-		_ = b.Close()
-	}
-}
+func (p *Plugin) Close() {}
 
 func (p *Plugin) readSource(ctx context.Context, src config.SingBoxSourceConfig) ([]byte, error) {
 	switch src.Type {
@@ -170,19 +150,18 @@ func (p *Plugin) readSource(ctx context.Context, src config.SingBoxSourceConfig)
 	}
 }
 
-func (p *Plugin) importContent(ctx context.Context, source string, content []byte, rep *core.ImportReport) ([]core.Candidate, map[string]core.CandidateDialer, map[string]interface{ Close() error }, error) {
+func (p *Plugin) importContent(ctx context.Context, source string, content []byte, rep *core.ImportReport) ([]core.Candidate, map[string]core.CandidateDialer, error) {
 	outbounds, err := parseToOutbounds(content, rep)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	if len(outbounds) == 0 {
-		return nil, nil, nil, fmt.Errorf("zero convertible sing-box outbounds")
+		return nil, nil, fmt.Errorf("zero convertible sing-box outbounds")
 	}
 	var cands []core.Candidate
 	dialers := map[string]core.CandidateDialer{}
-	boxes := map[string]interface{ Close() error }{}
 	for _, ob := range outbounds {
-		cand, dialer, b, err := buildSingleOutbound(ctx, ob, source)
+		cand, dialer, err := buildSingleOutbound(ctx, ob, source)
 		if err != nil {
 			typ := fmt.Sprint(ob["type"])
 			rep.AddSkip("build_failed_" + typ)
@@ -190,58 +169,215 @@ func (p *Plugin) importContent(ctx context.Context, source string, content []byt
 		}
 		cands = append(cands, cand)
 		dialers[cand.Fingerprint] = dialer
-		boxes[cand.Fingerprint] = b
 	}
 	if len(cands) == 0 {
-		for _, b := range boxes {
-			_ = b.Close()
-		}
-		return nil, nil, nil, fmt.Errorf("zero sing-box nodes started")
+		return nil, nil, fmt.Errorf("zero sing-box nodes built")
 	}
-	return cands, dialers, boxes, nil
+	return cands, dialers, nil
 }
 
-func buildSingleOutbound(parent context.Context, ob map[string]any, source string) (core.Candidate, core.CandidateDialer, *box.Box, error) {
+func buildSingleOutbound(parent context.Context, ob map[string]any, source string) (core.Candidate, core.CandidateDialer, error) {
 	tag, _ := ob["tag"].(string)
 	if tag == "" {
 		tag = "node-" + shortHash([]byte(fmt.Sprint(ob)))
 		ob["tag"] = tag
 	}
 	typ, _ := ob["type"].(string)
-	cfgMap := map[string]any{"log": map[string]any{"disabled": true}, "dns": map[string]any{"servers": []map[string]any{{"type": "udp", "tag": "dns-default", "server": "1.1.1.1"}}, "final": "dns-default"}, "outbounds": []map[string]any{cleanOutboundMap(ob)}, "route": map[string]any{"final": tag}}
+	cfgMap := outboundBoxConfig(ob, tag)
 	jsonBytes, _ := json.Marshal(cfgMap)
-	ctx := minimalSingBoxContext(parent)
-	var opts option.Options
-	if err := opts.UnmarshalJSONContext(ctx, jsonBytes); err != nil {
-		return core.Candidate{}, nil, nil, err
-	}
-	b, err := box.New(box.Options{Options: opts, Context: ctx})
-	if err != nil {
-		return core.Candidate{}, nil, nil, err
-	}
-	if err := b.Start(); err != nil {
-		_ = b.Close()
-		return core.Candidate{}, nil, nil, err
-	}
-	outbound, ok := b.Outbound().Outbound(tag)
-	if !ok {
-		_ = b.Close()
-		return core.Candidate{}, nil, nil, fmt.Errorf("outbound not found")
-	}
 	server := fmt.Sprint(ob["server"])
 	port := toInt(ob["server_port"])
 	c := core.Candidate{Protocol: core.ProtocolSingBox, Host: server, Port: port, Source: "singbox", Name: tag, Metadata: map[string]string{"tag": tag, "type": typ, "source": source, "config_hash": shortHash(jsonBytes)}}
 	c.Normalize()
-	return c, &outboundDialer{outbound: outbound}, b, nil
+	dialer := newLazyOutboundDialer(parent, tag, jsonBytes, defaultSingBoxIdleCloseAfter)
+	return c, dialer, nil
 }
 
-type outboundDialer struct{ outbound adapter.Outbound }
-
-func (d *outboundDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
-	return d.outbound.DialContext(ctx, network, M.ParseSocksaddr(address))
+func outboundBoxConfig(ob map[string]any, tag string) map[string]any {
+	return map[string]any{
+		"log": map[string]any{"disabled": true},
+		"dns": map[string]any{
+			"servers": []map[string]any{{"type": "udp", "tag": "dns-default", "server": "1.1.1.1"}},
+			"final":   "dns-default",
+		},
+		"outbounds": []map[string]any{cleanOutboundMap(ob)},
+		"route":     map[string]any{"final": tag},
+	}
 }
-func (d *outboundDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
-	return d.outbound.ListenPacket(ctx, destination)
+
+type lazyOutboundDialer struct {
+	ctx       context.Context
+	tag       string
+	config    []byte
+	idleAfter time.Duration
+
+	mu       sync.Mutex
+	box      *box.Box
+	outbound adapter.Outbound
+	active   int
+	lastUsed time.Time
+	timer    *time.Timer
+}
+
+func newLazyOutboundDialer(ctx context.Context, tag string, config []byte, idleAfter time.Duration) *lazyOutboundDialer {
+	cfg := append([]byte(nil), config...)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return &lazyOutboundDialer{ctx: ctx, tag: tag, config: cfg, idleAfter: idleAfter}
+}
+
+func (d *lazyOutboundDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	outbound, err := d.acquire()
+	if err != nil {
+		return nil, err
+	}
+	conn, err := outbound.DialContext(ctx, network, M.ParseSocksaddr(address))
+	if err != nil {
+		d.release()
+		return nil, err
+	}
+	return &managedSingBoxConn{Conn: conn, release: d.release}, nil
+}
+
+func (d *lazyOutboundDialer) acquire() (adapter.Outbound, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.timer != nil {
+		d.timer.Stop()
+		d.timer = nil
+	}
+	outbound, err := d.ensureLocked()
+	if err != nil {
+		return nil, err
+	}
+	d.active++
+	d.lastUsed = time.Now()
+	return outbound, nil
+}
+
+func (d *lazyOutboundDialer) ensureLocked() (adapter.Outbound, error) {
+	if d.box != nil && d.outbound != nil {
+		return d.outbound, nil
+	}
+	b, outbound, err := startOutboundBox(d.ctx, d.tag, d.config)
+	if err != nil {
+		return nil, err
+	}
+	d.box = b
+	d.outbound = outbound
+	return outbound, nil
+}
+
+func startOutboundBox(parent context.Context, tag string, jsonBytes []byte) (*box.Box, adapter.Outbound, error) {
+	ctx := minimalSingBoxContext(parent)
+	var opts option.Options
+	if err := opts.UnmarshalJSONContext(ctx, jsonBytes); err != nil {
+		return nil, nil, err
+	}
+	b, err := box.New(box.Options{Options: opts, Context: ctx})
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := b.Start(); err != nil {
+		_ = b.Close()
+		return nil, nil, err
+	}
+	outbound, ok := b.Outbound().Outbound(tag)
+	if !ok {
+		_ = b.Close()
+		return nil, nil, fmt.Errorf("outbound not found")
+	}
+	return b, outbound, nil
+}
+
+func (d *lazyOutboundDialer) release() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.active > 0 {
+		d.active--
+	}
+	d.lastUsed = time.Now()
+	if d.active == 0 {
+		d.scheduleIdleCloseLocked()
+	}
+}
+
+func (d *lazyOutboundDialer) ResetIdleCache() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.active == 0 {
+		_ = d.closeLocked()
+	}
+}
+
+func (d *lazyOutboundDialer) Close() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.closeLocked()
+}
+
+func (d *lazyOutboundDialer) scheduleIdleCloseLocked() {
+	if d.box == nil {
+		return
+	}
+	if d.idleAfter <= 0 {
+		_ = d.closeLocked()
+		return
+	}
+	if d.timer != nil {
+		d.timer.Stop()
+	}
+	d.timer = time.AfterFunc(d.idleAfter, d.closeIfIdle)
+}
+
+func (d *lazyOutboundDialer) closeIfIdle() {
+	closed := false
+	d.mu.Lock()
+	if d.active == 0 && d.box != nil && time.Since(d.lastUsed) >= d.idleAfter {
+		_ = d.closeLocked()
+		closed = true
+	}
+	d.mu.Unlock()
+	if closed {
+		scheduleFreeOSMemory()
+	}
+}
+
+func scheduleFreeOSMemory() {
+	if !freeOSMemoryScheduled.CompareAndSwap(false, true) {
+		return
+	}
+	time.AfterFunc(time.Second, func() {
+		debug.FreeOSMemory()
+		freeOSMemoryScheduled.Store(false)
+	})
+}
+
+func (d *lazyOutboundDialer) closeLocked() error {
+	if d.timer != nil {
+		d.timer.Stop()
+		d.timer = nil
+	}
+	b := d.box
+	d.box = nil
+	d.outbound = nil
+	if b == nil {
+		return nil
+	}
+	return b.Close()
+}
+
+type managedSingBoxConn struct {
+	net.Conn
+	release func()
+	once    sync.Once
+}
+
+func (c *managedSingBoxConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(c.release)
+	return err
 }
 
 func parseToOutbounds(content []byte, rep *core.ImportReport) ([]map[string]any, error) {
@@ -645,6 +781,21 @@ func cleanOutboundMap(m map[string]any) map[string]any {
 			continue
 		}
 		out[k] = v
+	}
+	switch strings.ToLower(fmt.Sprint(out["type"])) {
+	case "direct", "block":
+		delete(out, "server")
+		delete(out, "server_port")
+		delete(out, "username")
+		delete(out, "password")
+		delete(out, "tls")
+		delete(out, "transport")
+		delete(out, "version")
+		delete(out, "method")
+		delete(out, "auth_str")
+		delete(out, "uuid")
+		delete(out, "flow")
+		delete(out, "security")
 	}
 	return out
 }

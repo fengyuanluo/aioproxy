@@ -2,6 +2,8 @@ package singbox
 
 import (
 	"context"
+	"net"
+	"strconv"
 	"testing"
 
 	"github.com/aioproxy/aioproxy/internal/config"
@@ -33,14 +35,56 @@ func TestParseBase64ShareList(t *testing.T) {
 
 func TestBuildSingleHTTPOutbound(t *testing.T) {
 	ob := map[string]any{"type": "http", "tag": "h", "server": "127.0.0.1", "server_port": 8080}
-	c, d, b, err := buildSingleOutbound(context.Background(), ob, "test")
+	c, d, err := buildSingleOutbound(context.Background(), ob, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if d == nil || c.Fingerprint == "" {
 		t.Fatal("missing dialer/candidate")
 	}
-	_ = b.Close()
+}
+
+func TestLazySingBoxDialerCanResetAndRecreate(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	host, portStr, _ := net.SplitHostPort(ln.Addr().String())
+	port, _ := strconv.Atoi(portStr)
+	ob := map[string]any{"type": "direct", "tag": "direct-test", "server": host, "server_port": port}
+	_, d, err := buildSingleOutbound(context.Background(), ob, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := d.DialContext(context.Background(), "tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("first dial failed: %v", err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("first close failed: %v", err)
+	}
+	if resetter, ok := d.(interface{ ResetIdleCache() }); !ok {
+		t.Fatal("dialer does not expose ResetIdleCache")
+	} else {
+		resetter.ResetIdleCache()
+	}
+	conn, err = d.DialContext(context.Background(), "tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("second dial failed after reset: %v", err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("second close failed: %v", err)
+	}
 }
 
 func TestUnsupportedTUICAndNaiveAreSkippedBeforeBuild(t *testing.T) {

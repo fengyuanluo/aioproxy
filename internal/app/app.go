@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
@@ -257,6 +258,9 @@ func (pm *pluginManager) refresh(ctx context.Context, p plugins.Plugin) {
 		}
 	}
 	valid := pm.val.Validate(ctx, res.Candidates, res.Dialers)
+	if resetIdleDialerCaches(res.Dialers) > 0 {
+		debug.FreeOSMemory()
+	}
 	if len(res.Candidates) > 0 && len(valid) == 0 {
 		degraded = true
 		lastErr = "zero candidates passed validation"
@@ -274,6 +278,17 @@ func (pm *pluginManager) refresh(ctx context.Context, p plugins.Plugin) {
 	pm.status[p.Name()] = core.PluginStatus{Name: p.Name(), Active: true, Degraded: degraded, LastRefresh: time.Now(), LastError: lastErr, Reports: updatedReports}
 	pm.mu.Unlock()
 	pm.logger.Info("plugin refresh finished", "plugin", p.Name(), "imported", len(res.Candidates), "validated", len(valid), "degraded", degraded)
+}
+
+func resetIdleDialerCaches(dialers map[string]core.CandidateDialer) int {
+	reset := 0
+	for _, d := range dialers {
+		if resetter, ok := d.(interface{ ResetIdleCache() }); ok {
+			resetter.ResetIdleCache()
+			reset++
+		}
+	}
+	return reset
 }
 
 func filterCandidatesForReport(candidates []core.Candidate, pluginName, reportSource string) []core.Candidate {
