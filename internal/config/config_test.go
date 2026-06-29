@@ -105,3 +105,23 @@ func TestCheckRejectsUnknownValidationStrategy(t *testing.T) {
 		t.Fatalf("unexpected errors: %v", r.Errors)
 	}
 }
+
+func TestCheckRejectsNegativeRetryAttempts(t *testing.T) {
+	c := Config{}
+	c.ApplyDefaults()
+	c.RuntimeFailure.RetryAttempts = -1
+	r := c.Check()
+	if r.OK() {
+		t.Fatal("expected negative retry_attempts to fail")
+	}
+	found := false
+	for _, err := range r.Errors {
+		if strings.Contains(err, "runtime_failure.retry_attempts") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("unexpected errors: %v", r.Errors)
+	}
+}

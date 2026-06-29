@@ -41,6 +41,7 @@ AIOPROXY 只读取 YAML 配置，不做环境变量展开。推荐从 `examples/
 ## runtime_failure
 
 - `runtime_failure.max_failures`：运行时失败累计到该值后候选退出调度。
+- `runtime_failure.retry_attempts`：单次请求首个候选失败后，允许在同一路由过滤结果内继续尝试的额外候选数；`0` 表示关闭请求级换源重试。
 - `runtime_failure.early_failure_window`：早期零字节关闭窗口，命中后计为候选失败。
 
 ## storage

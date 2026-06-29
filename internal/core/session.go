@@ -163,6 +163,56 @@ func (m *SessionManager) Pick(info SessionInfo, pool *Pool, policy string) (Cand
 	return c, true
 }
 
+func (m *SessionManager) GetBound(info SessionInfo, pool *Pool) (Candidate, bool) {
+	if info.SessionID == "" {
+		return Candidate{}, false
+	}
+	bindingKey := info.BindingKey()
+	now := time.Now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sweepExpiredLocked(now, time.Minute)
+	b, ok := m.bindings[bindingKey]
+	if !ok || !now.Before(b.ExpiresAt) {
+		delete(m.bindings, bindingKey)
+		return Candidate{}, false
+	}
+	c, available := pool.GetAvailable(b.Fingerprint)
+	if !available || !c.MatchesRoute(info.Plugin, info.Region) {
+		delete(m.bindings, bindingKey)
+		return Candidate{}, false
+	}
+	b.ExpiresAt = now.Add(b.TTL)
+	m.bindings[bindingKey] = b
+	return c, true
+}
+
+func (m *SessionManager) Rebind(info SessionInfo, fingerprint string) {
+	if info.SessionID == "" {
+		return
+	}
+	ttl := info.TTL
+	if ttl <= 0 {
+		ttl = m.defaultTTL
+	}
+	if m.maxTTL > 0 && ttl > m.maxTTL {
+		ttl = m.maxTTL
+	}
+	now := time.Now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.bindings[info.BindingKey()] = sessionBinding{Fingerprint: fingerprint, ExpiresAt: now.Add(ttl), TTL: ttl}
+}
+
+func (m *SessionManager) Unbind(info SessionInfo) {
+	if info.SessionID == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.bindings, info.BindingKey())
+}
+
 func (m *SessionManager) sweepExpiredLocked(now time.Time, interval time.Duration) {
 	if interval > 0 && !m.lastSweep.IsZero() && now.Sub(m.lastSweep) < interval {
 		return

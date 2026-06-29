@@ -175,3 +175,31 @@ func TestSessionScopedBindingsDoNotCrossPlugin(t *testing.T) {
 		t.Fatalf("expected fpl candidate, got %+v ok=%v", second, ok)
 	}
 }
+
+func TestSessionRebindAndUnbind(t *testing.T) {
+	pool := NewPool()
+	pool.AddValidated([]Candidate{
+		{Protocol: ProtocolHTTP, Host: "1.1.1.1", Port: 80, Source: "a"},
+		{Protocol: ProtocolHTTP, Host: "2.2.2.2", Port: 80, Source: "a"},
+	}, nil)
+	list := pool.List()
+	sm := NewSessionManager(time.Minute, time.Hour)
+	info := SessionInfo{Credential: "aio", SessionID: "job-001", TTL: time.Minute}
+
+	sm.Rebind(info, list[0].Fingerprint)
+	got, ok := sm.GetBound(info, pool)
+	if !ok || got.Fingerprint != list[0].Fingerprint {
+		t.Fatalf("expected initial binding, got %+v ok=%v", got, ok)
+	}
+
+	sm.Rebind(info, list[1].Fingerprint)
+	got, ok = sm.GetBound(info, pool)
+	if !ok || got.Fingerprint != list[1].Fingerprint {
+		t.Fatalf("expected rebound candidate, got %+v ok=%v", got, ok)
+	}
+
+	sm.Unbind(info)
+	if _, ok := sm.GetBound(info, pool); ok {
+		t.Fatal("expected binding to be removed")
+	}
+}

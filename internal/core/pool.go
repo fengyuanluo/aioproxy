@@ -139,12 +139,19 @@ func (p *Pool) Pick(policy string) (Candidate, bool) {
 }
 
 func (p *Pool) PickMatching(policy string, match func(Candidate) bool) (Candidate, bool) {
+	return p.PickMatchingExcluding(policy, match, nil)
+}
+
+func (p *Pool) PickMatchingExcluding(policy string, match func(Candidate) bool, exclude map[string]struct{}) (Candidate, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if policy == "round_robin" {
 		for attempts := 0; attempts < len(p.order); attempts++ {
 			fp := p.order[p.rr%len(p.order)]
 			p.rr++
+			if _, skip := exclude[fp]; skip {
+				continue
+			}
 			if c, ok := p.items[fp]; ok && c.Status == StatusAvailable && match(c) {
 				return c, true
 			}
@@ -153,6 +160,9 @@ func (p *Pool) PickMatching(policy string, match func(Candidate) bool) (Candidat
 	}
 	available := make([]Candidate, 0, len(p.items))
 	for _, fp := range p.order {
+		if _, skip := exclude[fp]; skip {
+			continue
+		}
 		if c, ok := p.items[fp]; ok && c.Status == StatusAvailable && match(c) {
 			available = append(available, c)
 		}
@@ -194,4 +204,19 @@ func (p *Pool) MarkSuccess(fingerprint string) {
 		p.items[fingerprint] = c
 		p.updatedAt = time.Now()
 	}
+}
+
+func (p *Pool) MatchingAvailable(match func(Candidate) bool, exclude map[string]struct{}) []Candidate {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make([]Candidate, 0, len(p.items))
+	for _, fp := range p.order {
+		if _, skip := exclude[fp]; skip {
+			continue
+		}
+		if c, ok := p.items[fp]; ok && c.Status == StatusAvailable && match(c) {
+			out = append(out, c)
+		}
+	}
+	return out
 }

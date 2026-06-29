@@ -20,6 +20,8 @@ import (
 	"github.com/aioproxy/aioproxy/internal/core"
 )
 
+const dialAttemptTimeout = 30 * time.Second
+
 type Server struct {
 	cfg          config.Config
 	pool         *core.Pool
@@ -272,18 +274,53 @@ func (s *Server) authenticate(username, password string) (core.SessionInfo, bool
 }
 
 func (s *Server) dialScheduled(target string, info core.SessionInfo) (net.Conn, core.Candidate, error) {
-	cand, ok := s.sessions.Pick(info, s.pool, s.cfg.Scheduler.Policy)
-	if !ok {
-		return nil, core.Candidate{}, errors.New("candidate pool is empty")
+	attempted := map[string]struct{}{}
+	maxAttempts := s.cfg.RuntimeFailure.RetryAttempts + 1
+	if maxAttempts <= 0 {
+		maxAttempts = 1
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	conn, err := DialViaCandidate(ctx, cand, target, s.pool.Dialer(cand.Fingerprint))
-	if err != nil {
+	var failures []string
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		cand, ok := s.pickCandidateForAttempt(info, attempted)
+		if !ok {
+			if len(failures) == 0 {
+				return nil, core.Candidate{}, errors.New("candidate pool is empty")
+			}
+			return nil, core.Candidate{}, fmt.Errorf("no more route-matching candidates after %d attempt(s): %s", len(failures), failures[len(failures)-1])
+		}
+		attempted[cand.Fingerprint] = struct{}{}
+		ctx, cancel := context.WithTimeout(context.Background(), dialAttemptTimeout)
+		conn, err := DialViaCandidate(ctx, cand, target, s.pool.Dialer(cand.Fingerprint))
+		cancel()
+		if err == nil {
+			if info.SessionID != "" {
+				s.sessions.Rebind(info, cand.Fingerprint)
+			}
+			if attempt > 1 {
+				s.logger.Info("proxy candidate retry succeeded", "session", info.SessionID, "plugin", info.Plugin, "region", info.Region, "attempt", attempt, "candidate", cand.Fingerprint[:16], "source", cand.Source)
+			}
+			return conn, cand, nil
+		}
 		s.pool.MarkFailure(cand.Fingerprint, err.Error(), s.cfg.RuntimeFailure.MaxFailures)
-		return nil, cand, err
+		if info.SessionID != "" {
+			s.sessions.Unbind(info)
+		}
+		failures = append(failures, err.Error())
+		s.logger.Warn("proxy candidate attempt failed", "session", info.SessionID, "plugin", info.Plugin, "region", info.Region, "attempt", attempt, "candidate", cand.Fingerprint[:16], "source", cand.Source, "error", err)
 	}
-	return conn, cand, nil
+	return nil, core.Candidate{}, fmt.Errorf("all %d route-matching candidate attempt(s) failed: %s", len(failures), failures[len(failures)-1])
+}
+
+func (s *Server) pickCandidateForAttempt(info core.SessionInfo, attempted map[string]struct{}) (core.Candidate, bool) {
+	match := func(c core.Candidate) bool { return c.MatchesRoute(info.Plugin, info.Region) }
+	if info.SessionID != "" {
+		if bound, ok := s.sessions.GetBound(info, s.pool); ok {
+			if _, seen := attempted[bound.Fingerprint]; !seen {
+				return bound, true
+			}
+		}
+	}
+	return s.pool.PickMatchingExcluding(s.cfg.Scheduler.Policy, match, attempted)
 }
 
 func (s *Server) tunnel(a net.Conn, b net.Conn, cand core.Candidate) {

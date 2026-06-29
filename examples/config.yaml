@@ -49,6 +49,8 @@ validation:
 runtime_failure:
   # Runtime errors before candidate eviction from scheduling.
   max_failures: 3
+  # After the first candidate fails at request time, try up to this many other same-route candidates.
+  retry_attempts: 3
   # Early zero-byte upstream closure window counted as proxy failure.
   early_failure_window: "3s"
 

@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -157,11 +158,153 @@ func TestHTTPProxyUsernameRouteByPluginAndRegion(t *testing.T) {
 	}
 }
 
+func TestHTTPProxyRetriesWithinRouteAndSucceeds(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "ok") }))
+	defer origin.Close()
+	target := mustHostPort(t, origin.URL)
+
+	pool := core.NewPool()
+	pool.AddValidated([]core.Candidate{
+		{Protocol: core.ProtocolSingBox, Host: "1.1.1.1", Port: 80, Source: "fpl"},
+		{Protocol: core.ProtocolSingBox, Host: "2.2.2.2", Port: 80, Source: "fpl"},
+	}, nil)
+	list := pool.List()
+	pool.RegisterDialer(list[0].Fingerprint, failDialer{err: errors.New("boom")})
+	pool.RegisterDialer(list[1].Fingerprint, fixedTargetDialer{target: target})
+
+	cfg := config.Config{}
+	cfg.ApplyDefaults()
+	cfg.Server.Listen = "127.0.0.1:0"
+	cfg.Auth.Enabled = true
+	cfg.Scheduler.Policy = "round_robin"
+	cfg.RuntimeFailure.MaxFailures = 3
+	cfg.RuntimeFailure.RetryAttempts = 1
+	cfg.RuntimeFailure.EarlyFailureWindow.Duration = time.Second
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv := NewServer(cfg, pool, core.NewSessionManager(time.Minute, time.Hour), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := srv.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	body := httpViaProxy(t, srv.Addr(), "aio~plugin=fpl", "change-me", origin.URL)
+	if body != "ok" {
+		t.Fatalf("body=%q", body)
+	}
+	first, _ := pool.Get(list[0].Fingerprint)
+	if first.FailureCount != 1 {
+		t.Fatalf("expected first candidate failure count=1, got %d", first.FailureCount)
+	}
+}
+
+func TestSessionRetryRebindsToHealthyCandidate(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "ok") }))
+	defer origin.Close()
+	target := mustHostPort(t, origin.URL)
+
+	pool := core.NewPool()
+	pool.AddValidated([]core.Candidate{
+		{Protocol: core.ProtocolSingBox, Host: "1.1.1.1", Port: 80, Source: "fpl"},
+		{Protocol: core.ProtocolSingBox, Host: "2.2.2.2", Port: 80, Source: "fpl"},
+	}, nil)
+	list := pool.List()
+	pool.RegisterDialer(list[0].Fingerprint, failDialer{err: errors.New("boom")})
+	pool.RegisterDialer(list[1].Fingerprint, fixedTargetDialer{target: target})
+
+	sm := core.NewSessionManager(time.Minute, time.Hour)
+	info := core.SessionInfo{Credential: "aio", SessionID: "job-001", TTL: time.Minute, Plugin: "fpl"}
+	sm.Rebind(info, list[0].Fingerprint)
+
+	cfg := config.Config{}
+	cfg.ApplyDefaults()
+	cfg.Server.Listen = "127.0.0.1:0"
+	cfg.Auth.Enabled = true
+	cfg.Scheduler.Policy = "round_robin"
+	cfg.RuntimeFailure.MaxFailures = 3
+	cfg.RuntimeFailure.RetryAttempts = 1
+	cfg.RuntimeFailure.EarlyFailureWindow.Duration = time.Second
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv := NewServer(cfg, pool, sm, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := srv.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	body := httpViaProxy(t, srv.Addr(), "aio~plugin=fpl~session=job-001", "change-me", origin.URL)
+	if body != "ok" {
+		t.Fatalf("body=%q", body)
+	}
+	bound, ok := sm.GetBound(info, pool)
+	if !ok || bound.Fingerprint != list[1].Fingerprint {
+		t.Fatalf("expected rebound to healthy candidate, got %+v ok=%v", bound, ok)
+	}
+}
+
+func TestHTTPProxyRouteFailureDoesNotFallbackGlobalPool(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, "ok") }))
+	defer origin.Close()
+	target := mustHostPort(t, origin.URL)
+
+	pool := core.NewPool()
+	pool.AddValidated([]core.Candidate{
+		{Protocol: core.ProtocolSingBox, Host: "1.1.1.1", Port: 80, Source: "fofa", Metadata: map[string]string{"country_code": "JP"}},
+		{Protocol: core.ProtocolSingBox, Host: "2.2.2.2", Port: 80, Source: "fpl", Metadata: map[string]string{"country_code": "US"}},
+	}, nil)
+	list := pool.List()
+	pool.RegisterDialer(list[0].Fingerprint, failDialer{err: errors.New("fofa down")})
+	pool.RegisterDialer(list[1].Fingerprint, fixedTargetDialer{target: target})
+
+	cfg := config.Config{}
+	cfg.ApplyDefaults()
+	cfg.Server.Listen = "127.0.0.1:0"
+	cfg.Auth.Enabled = true
+	cfg.Scheduler.Policy = "round_robin"
+	cfg.RuntimeFailure.MaxFailures = 3
+	cfg.RuntimeFailure.RetryAttempts = 2
+	cfg.RuntimeFailure.EarlyFailureWindow.Duration = time.Second
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv := NewServer(cfg, pool, core.NewSessionManager(time.Minute, time.Hour), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := srv.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	proxyURL, err := url.Parse("http://" + url.UserPassword("aio~plugin=fofa", "change-me").String() + "@" + srv.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}, Timeout: 5 * time.Second}
+	resp, err := client.Get(origin.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%q", resp.StatusCode, body)
+	}
+}
+
 type fixedTargetDialer struct{ target string }
 
 func (d fixedTargetDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	var nd net.Dialer
 	return nd.DialContext(ctx, network, d.target)
+}
+
+type failDialer struct{ err error }
+
+func (d failDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	if d.err != nil {
+		return nil, d.err
+	}
+	return nil, errors.New("dial failed")
 }
 
 func mustHostPort(t *testing.T, rawURL string) string {

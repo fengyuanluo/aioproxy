@@ -168,6 +168,7 @@ type ValidationConfig struct {
 type RuntimeFailureConfig struct {
 	MaxFailures        int      `yaml:"max_failures"`
 	EarlyFailureWindow Duration `yaml:"early_failure_window"`
+	RetryAttempts      int      `yaml:"retry_attempts"`
 }
 
 type StorageConfig struct {
@@ -296,6 +297,9 @@ func (c *Config) ApplyDefaults() {
 	if c.RuntimeFailure.MaxFailures == 0 {
 		c.RuntimeFailure.MaxFailures = 3
 	}
+	if c.RuntimeFailure.RetryAttempts == 0 {
+		c.RuntimeFailure.RetryAttempts = 3
+	}
 	if c.RuntimeFailure.EarlyFailureWindow.Duration == 0 {
 		c.RuntimeFailure.EarlyFailureWindow.Duration = 3 * time.Second
 	}
@@ -407,6 +411,9 @@ func (c *Config) Check() CheckResult {
 	}
 	if c.RuntimeFailure.MaxFailures <= 0 {
 		r.Errors = append(r.Errors, "runtime_failure.max_failures must be positive")
+	}
+	if c.RuntimeFailure.RetryAttempts < 0 {
+		r.Errors = append(r.Errors, "runtime_failure.retry_attempts must be zero or positive")
 	}
 	if strings.EqualFold(c.Logging.Level, "debug") {
 		r.Warnings = append(r.Warnings, "debug logging may write secrets and full proxy/subscription material to disk")
