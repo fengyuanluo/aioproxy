@@ -2,10 +2,12 @@ package admin
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -61,7 +63,7 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.cfg.Token != "" {
 			token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-			if token != s.cfg.Token {
+			if subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.Token)) != 1 {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
@@ -94,13 +96,45 @@ func (s *Server) poolView(w http.ResponseWriter, r *http.Request) {
 		Port, FailureCount                                                                     int
 		LastValidation                                                                         time.Time
 	}
-	var out []view
-	for _, c := range s.pool.List() {
+	q := r.URL.Query()
+	limit := boundedInt(q.Get("limit"), 1000, 1, 5000)
+	offset := boundedInt(q.Get("offset"), 0, 0, 1<<30)
+	source := strings.TrimSpace(q.Get("source"))
+	status := strings.TrimSpace(q.Get("status"))
+	protocol := strings.TrimSpace(q.Get("protocol"))
+	totalMatched := 0
+	returned := 0
+	out := make([]view, 0, min(limit, 256))
+	s.pool.ForEach(func(c core.Candidate) bool {
+		if source != "" && !strings.EqualFold(c.Source, source) {
+			return true
+		}
+		if status != "" && !strings.EqualFold(c.Status, status) {
+			return true
+		}
+		if protocol != "" && !strings.EqualFold(c.Protocol, protocol) {
+			return true
+		}
+		totalMatched++
+		if totalMatched <= offset {
+			return true
+		}
+		if returned >= limit {
+			return true
+		}
 		out = append(out, view{c.ID, c.Fingerprint[:16], c.Protocol, c.Host, c.Source, c.Name, c.Status, c.LastError, c.Metadata["country_code"], c.Metadata["country"], c.Port, c.FailureCount, c.LastValidation})
-	}
+		returned++
+		return true
+	})
+	w.Header().Set("X-Pool-Matched", strconv.Itoa(totalMatched))
+	w.Header().Set("X-Pool-Returned", strconv.Itoa(returned))
+	w.Header().Set("X-Pool-Limit", strconv.Itoa(limit))
+	w.Header().Set("X-Pool-Offset", strconv.Itoa(offset))
 	writeJSON(w, out)
 }
-func (s *Server) plugins(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.statuses()) }
+func (s *Server) plugins(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, safePluginStatuses(s.statuses()))
+}
 func (s *Server) snapshots(w http.ResponseWriter, r *http.Request) {
 	files, _ := s.store.SnapshotFiles()
 	writeJSON(w, map[string]any{"files": files})
@@ -108,4 +142,59 @@ func (s *Server) snapshots(w http.ResponseWriter, r *http.Request) {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func safePluginStatuses(statuses []core.PluginStatus) []core.PluginStatus {
+	out := make([]core.PluginStatus, len(statuses))
+	copy(out, statuses)
+	for i := range out {
+		reports := make([]core.ImportReport, len(out[i].Reports))
+		copy(reports, out[i].Reports)
+		for j := range reports {
+			reports[j].Metadata = safeReportMetadata(reports[j].Metadata)
+		}
+		out[i].Reports = reports
+	}
+	return out
+}
+
+func safeReportMetadata(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	allowed := map[string]struct{}{"type": {}, "protocol": {}}
+	out := map[string]string{}
+	for k, v := range in {
+		if _, ok := allowed[k]; ok {
+			out[k] = v
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func boundedInt(raw string, def, minVal, maxVal int) int {
+	if strings.TrimSpace(raw) == "" {
+		return def
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		return def
+	}
+	if v < minVal {
+		return minVal
+	}
+	if v > maxVal {
+		return maxVal
+	}
+	return v
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

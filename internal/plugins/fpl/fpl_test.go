@@ -2,6 +2,8 @@ package fpl
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -43,5 +45,34 @@ func TestRefreshInvalidURLReturnsReportError(t *testing.T) {
 	}
 	if len(res.Candidates) != 0 {
 		t.Fatalf("candidates=%d", len(res.Candidates))
+	}
+}
+
+func TestRefreshAnnotatesCandidatesWithSourceLabel(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("http://1.2.3.4:80\n"))
+	}))
+	defer ts.Close()
+	p := New(config.FPLConfig{URL: ts.URL})
+	res := p.Refresh(context.Background())
+	if len(res.Candidates) != 1 {
+		t.Fatalf("candidates=%d reports=%+v", len(res.Candidates), res.Reports)
+	}
+	if len(res.Reports) != 1 {
+		t.Fatalf("reports=%d", len(res.Reports))
+	}
+	if got, want := res.Candidates[0].Metadata["source"], res.Reports[0].Source; got != want || got == "" {
+		t.Fatalf("candidate source metadata=%q want report source %q", got, want)
+	}
+}
+
+func TestParseReportsScannerError(t *testing.T) {
+	rep := &core.ImportReport{}
+	_ = parse(strings.NewReader("http://"+strings.Repeat("a", 2<<20)+":80\n"), rep)
+	if rep.Error == "" {
+		t.Fatalf("expected scanner error for overlong line")
+	}
+	if !strings.Contains(rep.Error, "scan proxy list") {
+		t.Fatalf("unexpected error: %s", rep.Error)
 	}
 }

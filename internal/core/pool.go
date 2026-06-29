@@ -65,6 +65,63 @@ func (p *Pool) AddValidated(candidates []Candidate, dialers map[string]Candidate
 	return added
 }
 
+func (p *Pool) ReplaceValidatedMatching(candidates []Candidate, dialers map[string]CandidateDialer, replace func(Candidate) bool) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	normalized := make([]Candidate, 0, len(candidates))
+	seen := make(map[string]struct{}, len(candidates))
+	for _, c := range candidates {
+		c.Normalize()
+		c.Status = StatusAvailable
+		c.FailureCount = 0
+		c.LastError = ""
+		if existing, ok := p.items[c.Fingerprint]; ok {
+			if !existing.CreatedAt.IsZero() {
+				c.CreatedAt = existing.CreatedAt
+			}
+		}
+		c.UpdatedAt = time.Now()
+		normalized = append(normalized, c)
+		seen[c.Fingerprint] = struct{}{}
+	}
+	if replace != nil {
+		nextOrder := p.order[:0]
+		for _, fp := range p.order {
+			c, ok := p.items[fp]
+			if !ok {
+				continue
+			}
+			if replace(c) {
+				if _, keep := seen[fp]; !keep {
+					delete(p.items, fp)
+					if d := p.dialers[fp]; d != nil {
+						if resetter, ok := d.(interface{ ResetIdleCache() }); ok {
+							resetter.ResetIdleCache()
+						}
+						delete(p.dialers, fp)
+					}
+					continue
+				}
+			}
+			nextOrder = append(nextOrder, fp)
+		}
+		p.order = nextOrder
+	}
+	for _, c := range normalized {
+		if _, exists := p.items[c.Fingerprint]; !exists {
+			p.order = append(p.order, c.Fingerprint)
+		}
+		p.items[c.Fingerprint] = c
+		if dialers != nil {
+			if d := dialers[c.Fingerprint]; d != nil {
+				p.dialers[c.Fingerprint] = d
+			}
+		}
+	}
+	p.updatedAt = time.Now()
+	return len(normalized)
+}
+
 func (p *Pool) RegisterDialer(fingerprint string, dialer CandidateDialer) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -87,6 +144,20 @@ func (p *Pool) List() []Candidate {
 		}
 	}
 	return out
+}
+
+func (p *Pool) ForEach(fn func(Candidate) bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, fp := range p.order {
+		c, ok := p.items[fp]
+		if !ok {
+			continue
+		}
+		if !fn(c) {
+			return
+		}
+	}
 }
 
 func (p *Pool) Available() []Candidate {
@@ -158,19 +229,20 @@ func (p *Pool) PickMatchingExcluding(policy string, match func(Candidate) bool, 
 		}
 		return Candidate{}, false
 	}
-	available := make([]Candidate, 0, len(p.items))
-	for _, fp := range p.order {
+	if len(p.order) == 0 {
+		return Candidate{}, false
+	}
+	start := rand.Intn(len(p.order))
+	for attempts := 0; attempts < len(p.order); attempts++ {
+		fp := p.order[(start+attempts)%len(p.order)]
 		if _, skip := exclude[fp]; skip {
 			continue
 		}
 		if c, ok := p.items[fp]; ok && c.Status == StatusAvailable && match(c) {
-			available = append(available, c)
+			return c, true
 		}
 	}
-	if len(available) == 0 {
-		return Candidate{}, false
-	}
-	return available[rand.Intn(len(available))], true
+	return Candidate{}, false
 }
 
 func (p *Pool) MarkFailure(fingerprint, reason string, maxFailures int) {

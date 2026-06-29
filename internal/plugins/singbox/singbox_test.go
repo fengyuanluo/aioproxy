@@ -1,9 +1,13 @@
 package singbox
 
 import (
+	"bufio"
 	"context"
+	"fmt"
 	"net"
+	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/aioproxy/aioproxy/internal/config"
@@ -56,17 +60,28 @@ func TestLazySingBoxDialerCanResetAndRecreate(t *testing.T) {
 			if err != nil {
 				return
 			}
-			_ = conn.Close()
+			go func(c net.Conn) {
+				defer c.Close()
+				req, err := http.ReadRequest(bufio.NewReader(c))
+				if err != nil {
+					return
+				}
+				if req.Method != http.MethodConnect {
+					_, _ = fmt.Fprint(c, "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n")
+					return
+				}
+				_, _ = fmt.Fprint(c, "HTTP/1.1 200 Connection Established\r\n\r\n")
+			}(conn)
 		}
 	}()
 	host, portStr, _ := net.SplitHostPort(ln.Addr().String())
 	port, _ := strconv.Atoi(portStr)
-	ob := map[string]any{"type": "direct", "tag": "direct-test", "server": host, "server_port": port}
+	ob := map[string]any{"type": "http", "tag": "http-test", "server": host, "server_port": port}
 	_, d, err := buildSingleOutbound(context.Background(), ob, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	conn, err := d.DialContext(context.Background(), "tcp", ln.Addr().String())
+	conn, err := d.DialContext(context.Background(), "tcp", "example.test:80")
 	if err != nil {
 		t.Fatalf("first dial failed: %v", err)
 	}
@@ -78,12 +93,27 @@ func TestLazySingBoxDialerCanResetAndRecreate(t *testing.T) {
 	} else {
 		resetter.ResetIdleCache()
 	}
-	conn, err = d.DialContext(context.Background(), "tcp", ln.Addr().String())
+	conn, err = d.DialContext(context.Background(), "tcp", "example.test:80")
 	if err != nil {
 		t.Fatalf("second dial failed after reset: %v", err)
 	}
 	if err := conn.Close(); err != nil {
 		t.Fatalf("second close failed: %v", err)
+	}
+}
+
+func TestDirectAndBlockAreSkippedBeforeBuild(t *testing.T) {
+	data := []byte("outbounds:\n  - type: direct\n    tag: d1\n  - type: block\n    tag: b1\n")
+	rep := &core.ImportReport{SkipReasons: map[string]int{}}
+	obs, err := parseToOutbounds(data, rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(obs) != 0 {
+		t.Fatalf("outbounds=%d want=0", len(obs))
+	}
+	if rep.SkipReasons["unsupported_direct"] != 1 || rep.SkipReasons["unsupported_block"] != 1 {
+		t.Fatalf("skip reasons=%v", rep.SkipReasons)
 	}
 }
 
@@ -113,5 +143,19 @@ func TestRefreshInvalidURLReturnsReportError(t *testing.T) {
 	}
 	if len(res.Candidates) != 0 {
 		t.Fatalf("candidates=%d", len(res.Candidates))
+	}
+}
+
+func TestReadSourceRejectsOversizedInline(t *testing.T) {
+	old := maxSingBoxSourceBytes
+	maxSingBoxSourceBytes = 16
+	defer func() { maxSingBoxSourceBytes = old }()
+	p := New(config.SingBoxConfig{})
+	_, err := p.readSource(context.Background(), config.SingBoxSourceConfig{Name: "big", Type: "inline", URL: strings.Repeat("x", int(maxSingBoxSourceBytes)+1)})
+	if err == nil {
+		t.Fatal("expected oversized source error")
+	}
+	if !strings.Contains(err.Error(), "source too large") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

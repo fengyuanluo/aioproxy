@@ -86,6 +86,7 @@ type Plugin struct {
 const defaultSingBoxIdleCloseAfter = 30 * time.Second
 
 var freeOSMemoryScheduled atomic.Bool
+var maxSingBoxSourceBytes int64 = 32 << 20
 
 func New(cfg config.SingBoxConfig) *Plugin {
 	return &Plugin{cfg: cfg, client: &http.Client{Timeout: 60 * time.Second}}
@@ -140,14 +141,34 @@ func (p *Plugin) readSource(ctx context.Context, src config.SingBoxSourceConfig)
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			return nil, fmt.Errorf("source status %s", resp.Status)
 		}
-		return io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+		return readAllLimited(resp.Body, maxSingBoxSourceBytes)
 	case "file":
-		return os.ReadFile(src.Path)
+		f, err := os.Open(src.Path)
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
+		return readAllLimited(f, maxSingBoxSourceBytes)
 	case "inline":
+		if int64(len(src.URL)) > maxSingBoxSourceBytes {
+			return nil, fmt.Errorf("source too large: limit %d bytes", maxSingBoxSourceBytes)
+		}
 		return []byte(src.URL), nil
 	default:
 		return nil, fmt.Errorf("unsupported source type %s", src.Type)
 	}
+}
+
+func readAllLimited(r io.Reader, maxBytes int64) ([]byte, error) {
+	lr := io.LimitReader(r, maxBytes+1)
+	body, err := io.ReadAll(lr)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > maxBytes {
+		return nil, fmt.Errorf("source too large: limit %d bytes", maxBytes)
+	}
+	return body, nil
 }
 
 func (p *Plugin) importContent(ctx context.Context, source string, content []byte, rep *core.ImportReport) ([]core.Candidate, map[string]core.CandidateDialer, error) {
@@ -688,7 +709,7 @@ func mapTransport(s string) string {
 
 func convertibleType(t string) bool {
 	switch strings.ToLower(t) {
-	case "direct", "block", "socks", "http", "shadowsocks", "vmess", "vless", "trojan", "hysteria", "hysteria2", "anytls", "shadowtls", "ssh":
+	case "socks", "http", "shadowsocks", "vmess", "vless", "trojan", "hysteria", "hysteria2", "anytls", "shadowtls", "ssh":
 		return true
 	}
 	return false

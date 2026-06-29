@@ -15,6 +15,7 @@ import (
 const (
 	DefaultProxyListen             = "127.0.0.1:1080"
 	DefaultAdminListen             = "127.0.0.1:1081"
+	DefaultProxyHandshakeTimeout   = 5 * time.Second
 	DefaultFPLURL                  = "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/all/data.txt"
 	DefaultValidationURL           = "http://www.gstatic.com/generate_204"
 	DefaultIPAPICountryURL         = "http://ip-api.com/json/?fields=status,message,country,countryCode,query"
@@ -24,7 +25,9 @@ const (
 	DefaultSnapshotRetain          = 7
 	DefaultFOFABaseURL             = "http://fofa.icu"
 	DefaultFOFASize                = 100
+	MaxFOFASize                    = 10000
 	DefaultFOFAFields              = "ip,port,protocol,host"
+	MaxValidationConcurrency       = 1000
 	DefaultGracefulShutdown        = 15 * time.Second
 	ValidationStrategyHTTPStatus   = "http_status"
 	ValidationStrategyIPAPICountry = "ip_api_country"
@@ -124,7 +127,8 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Listen string `yaml:"listen"`
+	Listen           string   `yaml:"listen"`
+	HandshakeTimeout Duration `yaml:"handshake_timeout"`
 }
 
 type AdminConfig struct {
@@ -225,8 +229,9 @@ type FOFAQueryConfig struct {
 }
 
 type SingBoxConfig struct {
-	RefreshInterval Duration              `yaml:"refresh_interval"`
-	Sources         []SingBoxSourceConfig `yaml:"sources"`
+	RefreshInterval       Duration              `yaml:"refresh_interval"`
+	ValidationConcurrency int                   `yaml:"validation_concurrency"`
+	Sources               []SingBoxSourceConfig `yaml:"sources"`
 }
 
 type SingBoxSourceConfig struct {
@@ -252,6 +257,9 @@ func Load(path string) (*Config, error) {
 func (c *Config) ApplyDefaults() {
 	if c.Server.Listen == "" {
 		c.Server.Listen = DefaultProxyListen
+	}
+	if c.Server.HandshakeTimeout.Duration == 0 {
+		c.Server.HandshakeTimeout.Duration = DefaultProxyHandshakeTimeout
 	}
 	if c.Admin.Listen == "" {
 		c.Admin.Listen = DefaultAdminListen
@@ -352,8 +360,13 @@ func (c *Config) ApplyDefaults() {
 			c.Plugins.FOFA.Queries = DefaultFOFAQueries()
 		}
 	}
-	if c.Plugins.SingBox != nil && c.Plugins.SingBox.RefreshInterval.Duration == 0 {
-		c.Plugins.SingBox.RefreshInterval.Duration = time.Hour
+	if c.Plugins.SingBox != nil {
+		if c.Plugins.SingBox.RefreshInterval.Duration == 0 {
+			c.Plugins.SingBox.RefreshInterval.Duration = time.Hour
+		}
+		if c.Plugins.SingBox.ValidationConcurrency == 0 {
+			c.Plugins.SingBox.ValidationConcurrency = 10
+		}
 	}
 }
 
@@ -377,6 +390,9 @@ func (c *Config) Check() CheckResult {
 	var r CheckResult
 	if err := validListen(c.Server.Listen); err != nil {
 		r.Errors = append(r.Errors, "server.listen: "+err.Error())
+	}
+	if c.Server.HandshakeTimeout.Duration <= 0 {
+		r.Errors = append(r.Errors, "server.handshake_timeout must be positive")
 	}
 	if err := validListen(c.Admin.Listen); err != nil {
 		r.Errors = append(r.Errors, "admin.listen: "+err.Error())
@@ -408,12 +424,20 @@ func (c *Config) Check() CheckResult {
 	}
 	if c.Validation.Concurrency <= 0 {
 		r.Errors = append(r.Errors, "validation.concurrency must be positive")
+	} else if c.Validation.Concurrency > MaxValidationConcurrency {
+		r.Errors = append(r.Errors, fmt.Sprintf("validation.concurrency must be <= %d", MaxValidationConcurrency))
 	}
 	if c.RuntimeFailure.MaxFailures <= 0 {
 		r.Errors = append(r.Errors, "runtime_failure.max_failures must be positive")
 	}
 	if c.RuntimeFailure.RetryAttempts < 0 {
 		r.Errors = append(r.Errors, "runtime_failure.retry_attempts must be zero or positive")
+	}
+	if c.RuntimeFailure.EarlyFailureWindow.Duration <= 0 {
+		r.Errors = append(r.Errors, "runtime_failure.early_failure_window must be positive")
+	}
+	if c.Refresh.JitterRatio < 0 || c.Refresh.JitterRatio > 1 {
+		r.Errors = append(r.Errors, "refresh.jitter_ratio must be between 0 and 1")
 	}
 	if strings.EqualFold(c.Logging.Level, "debug") {
 		r.Warnings = append(r.Warnings, "debug logging may write secrets and full proxy/subscription material to disk")
@@ -425,6 +449,11 @@ func (c *Config) Check() CheckResult {
 		}
 	}
 	if c.Plugins.FOFA != nil {
+		if c.Plugins.FOFA.Size <= 0 {
+			r.Errors = append(r.Errors, "plugins.fofa.size must be positive")
+		} else if c.Plugins.FOFA.Size > MaxFOFASize {
+			r.Errors = append(r.Errors, fmt.Sprintf("plugins.fofa.size must be <= %d", MaxFOFASize))
+		}
 		if c.Plugins.FOFA.Key == "" {
 			r.Warnings = append(r.Warnings, "FOFA config exists but key is empty; FOFA will not activate")
 		} else {
@@ -432,6 +461,9 @@ func (c *Config) Check() CheckResult {
 		}
 	}
 	if c.Plugins.SingBox != nil {
+		if c.Plugins.SingBox.ValidationConcurrency <= 0 {
+			r.Errors = append(r.Errors, "plugins.singbox.validation_concurrency must be positive")
+		}
 		if len(c.Plugins.SingBox.Sources) == 0 {
 			r.Warnings = append(r.Warnings, "singbox config exists but sources is empty; singbox will not activate")
 		} else {

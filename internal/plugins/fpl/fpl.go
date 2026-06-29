@@ -55,6 +55,13 @@ func (p *Plugin) Refresh(ctx context.Context) core.PluginResult {
 		return core.PluginResult{Reports: []core.ImportReport{report}}
 	}
 	candidates := parse(resp.Body, &report)
+	for i := range candidates {
+		if candidates[i].Metadata == nil {
+			candidates[i].Metadata = map[string]string{}
+		}
+		candidates[i].Metadata["source"] = report.Source
+		candidates[i].Normalize()
+	}
 	report.Imported = len(candidates)
 	report.FinishedAt = time.Now()
 	return core.PluginResult{Candidates: candidates, Reports: []core.ImportReport{report}}
@@ -92,6 +99,9 @@ func parse(r io.Reader, report *core.ImportReport) []core.Candidate {
 		default:
 			report.AddSkip("unknown_scheme")
 		}
+	}
+	if err := s.Err(); err != nil {
+		report.Error = "scan proxy list: " + err.Error()
 	}
 	return out
 }

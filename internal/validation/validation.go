@@ -33,6 +33,9 @@ func (v *Validator) Validate(ctx context.Context, candidates []core.Candidate, d
 	if workers <= 0 {
 		workers = 50
 	}
+	if workers > len(candidates) {
+		workers = len(candidates)
+	}
 	in := make(chan core.Candidate)
 	out := make(chan core.Candidate, len(candidates))
 	var wg sync.WaitGroup

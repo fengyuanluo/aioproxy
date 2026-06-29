@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -14,6 +15,8 @@ import (
 	"github.com/aioproxy/aioproxy/internal/config"
 	"github.com/aioproxy/aioproxy/internal/core"
 )
+
+var maxFOFAResponseBytes int64 = 8 << 20
 
 type Plugin struct {
 	cfg    config.FOFAConfig
@@ -81,8 +84,12 @@ func (p *Plugin) search(ctx context.Context, q config.FOFAQueryConfig, rep *core
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("fofa status %s", resp.Status)
 	}
+	body, err := readLimited(resp.Body, maxFOFAResponseBytes)
+	if err != nil {
+		return nil, err
+	}
 	var sr searchResp
-	if err := json.NewDecoder(resp.Body).Decode(&sr); err != nil {
+	if err := json.Unmarshal(body, &sr); err != nil {
 		return nil, err
 	}
 	if sr.Error {
@@ -117,6 +124,18 @@ func (p *Plugin) search(ctx context.Context, q config.FOFAQueryConfig, rep *core
 		out = append(out, c)
 	}
 	return out, nil
+}
+
+func readLimited(r io.Reader, maxBytes int64) ([]byte, error) {
+	lr := io.LimitReader(r, maxBytes+1)
+	body, err := io.ReadAll(lr)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > maxBytes {
+		return nil, fmt.Errorf("response body too large: limit %d bytes", maxBytes)
+	}
+	return body, nil
 }
 
 func splitFields(s string) []string {

@@ -5,6 +5,7 @@ AIOPROXY 只读取 YAML 配置，不做环境变量展开。推荐从 `examples/
 ## server
 
 - `server.listen`：HTTP/SOCKS5 混合代理监听地址。默认示例为 `127.0.0.1:1080`，如需给局域网设备使用再显式改成 `0.0.0.0:1080` 或具体内网地址。
+- `server.handshake_timeout`：客户端完成初始 HTTP/SOCKS5 握手的最长时间，默认 `5s`。用于释放慢连接占用的 goroutine/文件描述符；不属于用户级连接配额。
 
 ## admin
 
@@ -82,4 +83,5 @@ AIOPROXY 只读取 YAML 配置，不做环境变量展开。推荐从 `examples/
 ## plugins.singbox
 
 - `refresh_interval`：sing-box 插件级刷新周期。
+- `validation_concurrency`：sing-box 专用验活并发上限。默认 `10`，实际使用 `min(validation.concurrency, plugins.singbox.validation_concurrency)`，用于限制刷新/地区验活期间同时启动的 sing-box 节点资源数量。
 - `sources`：订阅/配置来源列表。支持 `url`、`file`、`inline` 类型。每个可转换节点作为独立 candidate，无法转换或无法启动的节点进入 import report 的 skip 统计。

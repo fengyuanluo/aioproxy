@@ -12,7 +12,7 @@ curl -H 'Authorization: Bearer <token>' http://host:1081/health
 
 - `GET /health`：整体状态、pool 数、session 数。插件 degraded、无 active plugin 或空池会导致 degraded。
 - `GET /stats`：pool、session、插件状态汇总。
-- `GET /pool`：基础候选信息，不返回 proxy password、FOFA key、完整订阅 URL 或 raw node。若候选通过 `ip_api_country` 验活入池，还会包含 `CountryCode` / `Country`。
+- `GET /pool`：基础候选信息，不返回 proxy password、FOFA key、完整订阅 URL 或 raw node。若候选通过 `ip_api_country` 验活入池，还会包含 `CountryCode` / `Country`。支持分页/过滤参数：`limit`（默认 1000，最大 5000）、`offset`、`source`、`status`、`protocol`；响应头包含 `X-Pool-Matched`、`X-Pool-Returned`、`X-Pool-Limit`、`X-Pool-Offset`。
 - `GET /plugins`：插件状态和 import reports。
 - `GET /snapshots`：已保留 snapshot 文件列表。
 

@@ -129,10 +129,6 @@ func writeJSONAtomic(path string, v any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		return err
-	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
 	if err != nil {
 		return err
@@ -144,7 +140,9 @@ func writeJSONAtomic(path string, v any) error {
 			_ = os.Remove(tmpName)
 		}
 	}()
-	if _, err := tmp.Write(b); err != nil {
+	enc := json.NewEncoder(tmp)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(v); err != nil {
 		_ = tmp.Close()
 		return err
 	}

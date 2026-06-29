@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCheckAdminTokenRequiredForNonLoopback(t *testing.T) {
@@ -123,5 +124,90 @@ func TestCheckRejectsNegativeRetryAttempts(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("unexpected errors: %v", r.Errors)
+	}
+}
+
+func TestSingBoxValidationConcurrencyDefaultAndValidation(t *testing.T) {
+	c := Config{Plugins: PluginsConfig{SingBox: &SingBoxConfig{Sources: []SingBoxSourceConfig{{Name: "s", Type: "inline", URL: "outbounds: []"}}}}}
+	c.ApplyDefaults()
+	if c.Plugins.SingBox.ValidationConcurrency != 10 {
+		t.Fatalf("singbox validation_concurrency default=%d want=10", c.Plugins.SingBox.ValidationConcurrency)
+	}
+	c.Plugins.SingBox.ValidationConcurrency = -1
+	r := c.Check()
+	if r.OK() {
+		t.Fatal("expected negative singbox validation_concurrency to fail")
+	}
+	found := false
+	for _, err := range r.Errors {
+		if strings.Contains(err, "plugins.singbox.validation_concurrency") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("unexpected errors: %v", r.Errors)
+	}
+}
+
+func TestCheckRejectsUnsafeTimingAndSizeBounds(t *testing.T) {
+	tests := []struct {
+		name string
+		mod  func(*Config)
+		key  string
+	}{
+		{
+			name: "negative jitter",
+			mod:  func(c *Config) { c.Refresh.JitterRatio = -0.1 },
+			key:  "refresh.jitter_ratio",
+		},
+		{
+			name: "too large jitter",
+			mod:  func(c *Config) { c.Refresh.JitterRatio = 1.1 },
+			key:  "refresh.jitter_ratio",
+		},
+		{
+			name: "negative early failure window",
+			mod:  func(c *Config) { c.RuntimeFailure.EarlyFailureWindow.Duration = -time.Second },
+			key:  "runtime_failure.early_failure_window",
+		},
+		{
+			name: "negative handshake timeout",
+			mod:  func(c *Config) { c.Server.HandshakeTimeout.Duration = -time.Second },
+			key:  "server.handshake_timeout",
+		},
+		{
+			name: "validation concurrency too high",
+			mod:  func(c *Config) { c.Validation.Concurrency = MaxValidationConcurrency + 1 },
+			key:  "validation.concurrency",
+		},
+		{
+			name: "fofa size too high",
+			mod: func(c *Config) {
+				c.Plugins.FOFA = &FOFAConfig{Key: "sample", Size: MaxFOFASize + 1}
+			},
+			key: "plugins.fofa.size",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Config{}
+			c.ApplyDefaults()
+			tc.mod(&c)
+			r := c.Check()
+			if r.OK() {
+				t.Fatal("expected config check to fail")
+			}
+			found := false
+			for _, err := range r.Errors {
+				if strings.Contains(err, tc.key) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("expected error containing %q, got %v", tc.key, r.Errors)
+			}
+		})
 	}
 }

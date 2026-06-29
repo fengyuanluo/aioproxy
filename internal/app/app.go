@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -51,15 +52,18 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:\n  aioproxy check -c config.yaml\n  aioproxy serve -c config.yaml")
 }
 func configPath(args []string) (string, bool) {
-	for i := 0; i < len(args); i++ {
-		if args[i] == "-c" || args[i] == "--config" {
-			if i+1 < len(args) {
-				return args[i+1], true
-			}
-			return "", false
-		}
+	fs := flag.NewFlagSet("config", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var path string
+	fs.StringVar(&path, "c", "", "config file")
+	fs.StringVar(&path, "config", "", "config file")
+	if err := fs.Parse(args); err != nil {
+		return "", false
 	}
-	return "", false
+	if path == "" || fs.NArg() != 0 {
+		return "", false
+	}
+	return path, true
 }
 
 func runCheck(args []string, stdout, stderr io.Writer) int {
@@ -169,7 +173,6 @@ type pluginManager struct {
 	pool   *core.Pool
 	store  *storage.Store
 	logger *slog.Logger
-	val    *validation.Validator
 	items  []plugins.Plugin
 	mu     sync.RWMutex
 	status map[string]core.PluginStatus
@@ -178,7 +181,7 @@ type pluginManager struct {
 }
 
 func newPluginManager(cfg *config.Config, pool *core.Pool, store *storage.Store, logger *slog.Logger) *pluginManager {
-	pm := &pluginManager{cfg: cfg, pool: pool, store: store, logger: logger, val: validation.New(cfg.Validation), status: map[string]core.PluginStatus{}}
+	pm := &pluginManager{cfg: cfg, pool: pool, store: store, logger: logger, status: map[string]core.PluginStatus{}}
 	if cfg.Plugins.FPL != nil {
 		pm.items = append(pm.items, fpl.New(*cfg.Plugins.FPL))
 	}
@@ -257,7 +260,7 @@ func (pm *pluginManager) refresh(ctx context.Context, p plugins.Plugin) {
 			lastErr = r.Error
 		}
 	}
-	valid := pm.val.Validate(ctx, res.Candidates, res.Dialers)
+	valid := pm.validatorForPlugin(p).Validate(ctx, res.Candidates, res.Dialers)
 	if resetIdleDialerCaches(res.Dialers) > 0 {
 		debug.FreeOSMemory()
 	}
@@ -265,19 +268,39 @@ func (pm *pluginManager) refresh(ctx context.Context, p plugins.Plugin) {
 		degraded = true
 		lastErr = "zero candidates passed validation"
 	}
-	pm.pool.AddValidated(valid, res.Dialers)
 	updatedReports := make([]core.ImportReport, len(res.Reports))
 	copy(updatedReports, res.Reports)
 	for i := range updatedReports {
 		reportCandidates := filterCandidatesForReport(valid, p.Name(), updatedReports[i].Source)
 		updatedReports[i].Validated = len(reportCandidates)
+		if updatedReports[i].Error == "" {
+			pm.pool.ReplaceValidatedMatching(reportCandidates, res.Dialers, func(c core.Candidate) bool {
+				return candidateMatchesReportSource(c, p.Name(), updatedReports[i].Source)
+			})
+		} else if len(reportCandidates) > 0 {
+			pm.pool.AddValidated(reportCandidates, res.Dialers)
+		}
 		_ = pm.store.SaveSnapshot(p.Name()+"-"+updatedReports[i].Source, updatedReports[i], reportCandidates)
+	}
+	if len(updatedReports) == 0 {
+		pm.pool.AddValidated(valid, res.Dialers)
 	}
 	_ = pm.store.SavePool(pm.pool.List())
 	pm.mu.Lock()
 	pm.status[p.Name()] = core.PluginStatus{Name: p.Name(), Active: true, Degraded: degraded, LastRefresh: time.Now(), LastError: lastErr, Reports: updatedReports}
 	pm.mu.Unlock()
 	pm.logger.Info("plugin refresh finished", "plugin", p.Name(), "imported", len(res.Candidates), "validated", len(valid), "degraded", degraded)
+}
+
+func (pm *pluginManager) validatorForPlugin(p plugins.Plugin) *validation.Validator {
+	cfg := pm.cfg.Validation
+	if p.Name() == "singbox" && pm.cfg.Plugins.SingBox != nil {
+		cap := pm.cfg.Plugins.SingBox.ValidationConcurrency
+		if cap > 0 && (cfg.Concurrency <= 0 || cap < cfg.Concurrency) {
+			cfg.Concurrency = cap
+		}
+	}
+	return validation.New(cfg)
 }
 
 func resetIdleDialerCaches(dialers map[string]core.CandidateDialer) int {
@@ -294,10 +317,7 @@ func resetIdleDialerCaches(dialers map[string]core.CandidateDialer) int {
 func filterCandidatesForReport(candidates []core.Candidate, pluginName, reportSource string) []core.Candidate {
 	out := make([]core.Candidate, 0, len(candidates))
 	for _, c := range candidates {
-		if c.Source != pluginName {
-			continue
-		}
-		if reportSource == "" || c.Metadata["query"] == reportSource || c.Metadata["source"] == reportSource || c.Source == reportSource || len(candidates) == 1 {
+		if candidateMatchesReportSource(c, pluginName, reportSource) {
 			out = append(out, c)
 		}
 	}
@@ -310,4 +330,20 @@ func filterCandidatesForReport(candidates []core.Candidate, pluginName, reportSo
 		}
 	}
 	return out
+}
+
+func candidateMatchesReportSource(c core.Candidate, pluginName, reportSource string) bool {
+	if c.Source != pluginName {
+		return false
+	}
+	if reportSource == "" {
+		return true
+	}
+	if c.Metadata["query"] == reportSource || c.Metadata["source"] == reportSource {
+		return true
+	}
+	if pluginName == "fpl" && c.Metadata["query"] == "" && c.Metadata["source"] == "" {
+		return true
+	}
+	return false
 }

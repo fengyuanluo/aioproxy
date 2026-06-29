@@ -28,6 +28,8 @@ type Server struct {
 	sessions     *core.SessionManager
 	logger       *slog.Logger
 	listener     net.Listener
+	ctx          context.Context
+	cancel       context.CancelFunc
 	shuttingDown atomic.Bool
 	wg           sync.WaitGroup
 	connMu       sync.Mutex
@@ -43,9 +45,10 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	s.ctx, s.cancel = context.WithCancel(ctx)
 	s.listener = ln
 	s.logger.Info("proxy listener started", "listen", s.cfg.Server.Listen)
-	go func() { <-ctx.Done(); _ = s.Close() }()
+	go func() { <-s.ctx.Done(); _ = s.Close() }()
 	go s.acceptLoop()
 	return nil
 }
@@ -59,6 +62,9 @@ func (s *Server) Addr() string {
 
 func (s *Server) Close() error {
 	s.shuttingDown.Store(true)
+	if s.cancel != nil {
+		s.cancel()
+	}
 	if s.listener != nil {
 		return s.listener.Close()
 	}
@@ -121,6 +127,9 @@ func (s *Server) acceptLoop() {
 
 func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
+	if timeout := s.cfg.Server.HandshakeTimeout.Duration; timeout > 0 {
+		_ = conn.SetReadDeadline(time.Now().Add(timeout))
+	}
 	br := bufio.NewReader(conn)
 	b, err := br.Peek(1)
 	if err != nil {
@@ -130,7 +139,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		s.handleSOCKS(conn, br)
 		return
 	}
-	s.handleHTTP(conn, br)
+	s.handleHTTPConn(conn, br)
 }
 
 func (s *Server) handleSOCKS(client net.Conn, br *bufio.Reader) {
@@ -188,6 +197,7 @@ func (s *Server) handleSOCKS(client net.Conn, br *bufio.Reader) {
 	}
 	port := int(portb[0])<<8 | int(portb[1])
 	target := net.JoinHostPort(host, strconv.Itoa(port))
+	_ = client.SetReadDeadline(time.Time{})
 	up, cand, err := s.dialScheduled(target, info)
 	if err != nil {
 		client.Write([]byte{0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
@@ -198,25 +208,35 @@ func (s *Server) handleSOCKS(client net.Conn, br *bufio.Reader) {
 	s.tunnel(client, up, cand)
 }
 
-func (s *Server) handleHTTP(client net.Conn, br *bufio.Reader) {
+func (s *Server) handleHTTPConn(client net.Conn, br *bufio.Reader) {
+	for {
+		if !s.handleHTTP(client, br) {
+			return
+		}
+	}
+}
+
+func (s *Server) handleHTTP(client net.Conn, br *bufio.Reader) bool {
 	req, err := http.ReadRequest(br)
 	if err != nil {
-		return
+		return false
 	}
+	clientClose := req.Close
 	info := core.SessionInfo{}
 	if s.cfg.Auth.Enabled {
 		u, p, ok := parseProxyAuth(req.Header.Get("Proxy-Authorization"))
 		if !ok {
 			writeHTTPProxyAuthRequired(client)
-			return
+			return false
 		}
 		parsed, authOK := s.authenticate(u, p)
 		if !authOK {
 			writeHTTPProxyAuthRequired(client)
-			return
+			return false
 		}
 		info = parsed
 	}
+	_ = client.SetReadDeadline(time.Time{})
 	req.Header.Del("Proxy-Authorization")
 	if req.Method == http.MethodConnect {
 		target := req.Host
@@ -226,22 +246,22 @@ func (s *Server) handleHTTP(client net.Conn, br *bufio.Reader) {
 		up, cand, err := s.dialScheduled(target, info)
 		if err != nil {
 			writeHTTPError(client, http.StatusServiceUnavailable, err.Error())
-			return
+			return false
 		}
 		defer up.Close()
 		io.WriteString(client, "HTTP/1.1 200 Connection Established\r\n\r\n")
 		s.tunnel(client, up, cand)
-		return
+		return false
 	}
 	target, err := httpTarget(req)
 	if err != nil {
 		writeHTTPError(client, http.StatusBadRequest, err.Error())
-		return
+		return false
 	}
 	up, cand, err := s.dialScheduled(target, info)
 	if err != nil {
 		writeHTTPError(client, http.StatusServiceUnavailable, err.Error())
-		return
+		return false
 	}
 	defer up.Close()
 	if req.URL.IsAbs() {
@@ -253,19 +273,22 @@ func (s *Server) handleHTTP(client net.Conn, br *bufio.Reader) {
 	req.Header.Set("Connection", "close")
 	if err := req.Write(up); err != nil {
 		s.pool.MarkFailure(cand.Fingerprint, err.Error(), s.cfg.RuntimeFailure.MaxFailures)
-		return
+		return false
 	}
 	resp, err := http.ReadResponse(bufio.NewReader(up), req)
 	if err != nil {
 		s.pool.MarkFailure(cand.Fingerprint, err.Error(), s.cfg.RuntimeFailure.MaxFailures)
-		return
+		return false
 	}
 	defer resp.Body.Close()
+	resp.Close = false
+	resp.Header.Del("Connection")
 	if err := resp.Write(client); err != nil {
 		s.pool.MarkFailure(cand.Fingerprint, err.Error(), s.cfg.RuntimeFailure.MaxFailures)
-		return
+		return false
 	}
 	s.pool.MarkSuccess(cand.Fingerprint)
+	return !clientClose
 }
 
 func (s *Server) authenticate(username, password string) (core.SessionInfo, bool) {
@@ -289,7 +312,11 @@ func (s *Server) dialScheduled(target string, info core.SessionInfo) (net.Conn, 
 			return nil, core.Candidate{}, fmt.Errorf("no more route-matching candidates after %d attempt(s): %s", len(failures), failures[len(failures)-1])
 		}
 		attempted[cand.Fingerprint] = struct{}{}
-		ctx, cancel := context.WithTimeout(context.Background(), dialAttemptTimeout)
+		parent := s.ctx
+		if parent == nil {
+			parent = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(parent, dialAttemptTimeout)
 		conn, err := DialViaCandidate(ctx, cand, target, s.pool.Dialer(cand.Fingerprint))
 		cancel()
 		if err == nil {
@@ -336,16 +363,33 @@ func (s *Server) tunnel(a net.Conn, b net.Conn, cand core.Candidate) {
 		_ = a.SetDeadline(time.Now())
 		done <- struct{}{}
 	}()
-	select {
-	case <-done:
-	case <-time.After(s.cfg.RuntimeFailure.EarlyFailureWindow.Duration):
-	}
-	if bytes.Load() == 0 {
-		s.pool.MarkFailure(cand.Fingerprint, "early zero-byte closure", s.cfg.RuntimeFailure.MaxFailures)
+	earlyClosed := false
+	window := s.cfg.RuntimeFailure.EarlyFailureWindow.Duration
+	if window <= 0 {
+		<-done
 	} else {
+		timer := time.NewTimer(window)
+		select {
+		case <-done:
+			earlyClosed = true
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+		case <-timer.C:
+		}
+	}
+	if earlyClosed && bytes.Load() == 0 {
+		s.pool.MarkFailure(cand.Fingerprint, "early zero-byte closure", s.cfg.RuntimeFailure.MaxFailures)
+	} else if bytes.Load() > 0 {
 		s.pool.MarkSuccess(cand.Fingerprint)
 	}
 	<-done
+	if bytes.Load() > 0 {
+		s.pool.MarkSuccess(cand.Fingerprint)
+	}
 }
 
 type countingWriter struct {

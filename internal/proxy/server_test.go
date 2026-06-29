@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -291,6 +292,191 @@ func TestHTTPProxyRouteFailureDoesNotFallbackGlobalPool(t *testing.T) {
 	}
 }
 
+func TestHTTPProxyKeepsClientConnectionForSequentialRequests(t *testing.T) {
+	var hits atomic.Int64
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "ok-%d", hits.Add(1))
+	}))
+	defer origin.Close()
+	target := mustHostPort(t, origin.URL)
+	pool := core.NewPool()
+	pool.AddValidated([]core.Candidate{{Protocol: core.ProtocolSingBox, Host: "1.1.1.1", Port: 80, Source: "test"}}, nil)
+	c := pool.List()[0]
+	pool.RegisterDialer(c.Fingerprint, fixedTargetDialer{target: target})
+	cfg := config.Config{}
+	cfg.ApplyDefaults()
+	cfg.Server.Listen = "127.0.0.1:0"
+	cfg.Auth.Enabled = true
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv := NewServer(cfg, pool, core.NewSessionManager(time.Minute, time.Hour), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := srv.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	conn, err := net.Dial("tcp", srv.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	br := bufio.NewReader(conn)
+	auth := "Proxy-Authorization: Basic YWlvOmNoYW5nZS1tZQ==\r\n"
+	for i := 1; i <= 2; i++ {
+		if _, err := fmt.Fprintf(conn, "GET http://example.test/request-%d HTTP/1.1\r\nHost: example.test\r\n%s\r\n", i, auth); err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.ReadResponse(br, nil)
+		if err != nil {
+			t.Fatalf("read response %d: %v", i, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if string(body) != fmt.Sprintf("ok-%d", i) {
+			t.Fatalf("response %d body=%q", i, body)
+		}
+	}
+}
+
+func TestTunnelIdlePastEarlyWindowDoesNotMarkFailure(t *testing.T) {
+	pool := core.NewPool()
+	pool.AddValidated([]core.Candidate{{Protocol: core.ProtocolHTTP, Host: "1.1.1.1", Port: 80, Source: "test"}}, nil)
+	cand := pool.List()[0]
+	cfg := config.Config{}
+	cfg.ApplyDefaults()
+	cfg.RuntimeFailure.MaxFailures = 1
+	cfg.RuntimeFailure.EarlyFailureWindow.Duration = 20 * time.Millisecond
+	srv := NewServer(cfg, pool, core.NewSessionManager(time.Minute, time.Hour), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	clientSide, clientPeer := net.Pipe()
+	upstreamSide, upstreamPeer := net.Pipe()
+	defer clientPeer.Close()
+	defer upstreamPeer.Close()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.tunnel(clientSide, upstreamSide, cand)
+	}()
+	time.Sleep(3 * cfg.RuntimeFailure.EarlyFailureWindow.Duration)
+	got, ok := pool.Get(cand.Fingerprint)
+	if !ok {
+		t.Fatal("candidate missing")
+	}
+	if got.FailureCount != 0 || got.Status != core.StatusAvailable {
+		t.Fatalf("idle open tunnel was marked failed: %+v", got)
+	}
+	_ = clientPeer.Close()
+	_ = upstreamPeer.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("tunnel did not exit")
+	}
+	got, _ = pool.Get(cand.Fingerprint)
+	if got.FailureCount != 0 || got.Status != core.StatusAvailable {
+		t.Fatalf("idle tunnel close after early window was marked failed: %+v", got)
+	}
+}
+
+func TestTunnelEarlyZeroByteCloseMarksFailure(t *testing.T) {
+	pool := core.NewPool()
+	pool.AddValidated([]core.Candidate{{Protocol: core.ProtocolHTTP, Host: "1.1.1.1", Port: 80, Source: "test"}}, nil)
+	cand := pool.List()[0]
+	cfg := config.Config{}
+	cfg.ApplyDefaults()
+	cfg.RuntimeFailure.MaxFailures = 1
+	cfg.RuntimeFailure.EarlyFailureWindow.Duration = time.Second
+	srv := NewServer(cfg, pool, core.NewSessionManager(time.Minute, time.Hour), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	clientSide, clientPeer := net.Pipe()
+	upstreamSide, upstreamPeer := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.tunnel(clientSide, upstreamSide, cand)
+	}()
+	_ = clientPeer.Close()
+	_ = upstreamPeer.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("tunnel did not exit")
+	}
+	got, _ := pool.Get(cand.Fingerprint)
+	if got.FailureCount != 1 || got.Status != core.StatusUnavailable {
+		t.Fatalf("early zero-byte close was not marked failed: %+v", got)
+	}
+}
+
+func TestSlowInitialHandshakeTimesOut(t *testing.T) {
+	pool := core.NewPool()
+	cfg := config.Config{}
+	cfg.ApplyDefaults()
+	cfg.Server.Listen = "127.0.0.1:0"
+	cfg.Server.HandshakeTimeout.Duration = 30 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv := NewServer(cfg, pool, core.NewSessionManager(time.Minute, time.Hour), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := srv.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	conn, err := net.Dial("tcp", srv.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	time.Sleep(3 * cfg.Server.HandshakeTimeout.Duration)
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	buf := []byte{0}
+	n, err := conn.Read(buf)
+	if err == nil || n != 0 {
+		t.Fatalf("expected slow handshake connection to be closed, n=%d err=%v", n, err)
+	}
+}
+
+func TestCloseCancelsInFlightDial(t *testing.T) {
+	pool := core.NewPool()
+	pool.AddValidated([]core.Candidate{{Protocol: core.ProtocolSingBox, Host: "1.1.1.1", Port: 80, Source: "test"}}, nil)
+	cand := pool.List()[0]
+	dialer := &blockingDialer{entered: make(chan struct{}), exited: make(chan struct{})}
+	pool.RegisterDialer(cand.Fingerprint, dialer)
+	cfg := config.Config{}
+	cfg.ApplyDefaults()
+	cfg.Server.Listen = "127.0.0.1:0"
+	cfg.Auth.Enabled = true
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv := NewServer(cfg, pool, core.NewSessionManager(time.Minute, time.Hour), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := srv.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	proxyURL, _ := url.Parse("http://aio:change-me@" + srv.Addr())
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}, Timeout: 2 * time.Second}
+	done := make(chan error, 1)
+	go func() {
+		resp, err := client.Get("http://example.test/")
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		done <- err
+	}()
+	select {
+	case <-dialer.entered:
+	case <-time.After(time.Second):
+		t.Fatal("dialer was not entered")
+	}
+	_ = srv.Close()
+	select {
+	case <-dialer.exited:
+	case <-time.After(time.Second):
+		t.Fatal("in-flight dial was not canceled by server close")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("client request did not finish after dial cancellation")
+	}
+}
+
 type fixedTargetDialer struct{ target string }
 
 func (d fixedTargetDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
@@ -305,6 +491,19 @@ func (d failDialer) DialContext(ctx context.Context, network, address string) (n
 		return nil, d.err
 	}
 	return nil, errors.New("dial failed")
+}
+
+type blockingDialer struct {
+	entered chan struct{}
+	exited  chan struct{}
+	once    sync.Once
+}
+
+func (d *blockingDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	d.once.Do(func() { close(d.entered) })
+	<-ctx.Done()
+	close(d.exited)
+	return nil, ctx.Err()
 }
 
 func mustHostPort(t *testing.T, rawURL string) string {

@@ -2,6 +2,8 @@
 server:
   # Mixed HTTP/SOCKS5 proxy listener. Default loopback avoids accidental network exposure.
   listen: "127.0.0.1:1080"
+  # Maximum time allowed to finish the initial HTTP/SOCKS5 handshake.
+  handshake_timeout: "5s"
 
 admin:
   # Read-only Admin API listener. Loopback does not require token.
@@ -103,6 +105,8 @@ plugins:
   # sing-box activates only when sources is non-empty.
   singbox:
     refresh_interval: "1h"
+    # sing-box validation can instantiate heavy per-node resources; keep its cap lower than global validation concurrency.
+    validation_concurrency: 10
     sources: []
     # Example:
     # sources:
