@@ -21,6 +21,7 @@ AIOPROXY 只读取 YAML 配置，不做环境变量展开。推荐从 `examples/
 ## scheduler
 
 - `scheduler.policy`：非 session 请求调度策略。可选 `random` 或 `round_robin`。session 绑定不是这里的调度策略，而是由用户名表达式显式触发。
+- `scheduler.fast_pool_percent`：当用户名使用 `-fast` 或 `~fast=true` 时，先按当前 `plugin` / `region` 路由过滤，再从命中候选中取**校验耗时最快的前 N%** 进入 fast 池。默认 `5`，范围 `1-100`。如果命中候选非空但按百分比向下取整得到 `0`，仍会至少保留 `1` 个候选。
 
 ## session
 

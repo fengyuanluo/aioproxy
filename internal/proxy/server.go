@@ -347,6 +347,9 @@ func (s *Server) pickCandidateForAttempt(info core.SessionInfo, attempted map[st
 			}
 		}
 	}
+	if info.Fast {
+		return s.pool.PickMatchingPercentExcluding(s.cfg.Scheduler.Policy, match, attempted, s.cfg.Scheduler.FastPoolPercent)
+	}
 	return s.pool.PickMatchingExcluding(s.cfg.Scheduler.Policy, match, attempted)
 }
 

@@ -22,6 +22,8 @@ auth:
 scheduler:
   # Non-session scheduling policy: random or round_robin.
   policy: "random"
+  # Requests using username -fast or ~fast=true only schedule inside the fastest top N percent after route filtering.
+  fast_pool_percent: 5
 
 session:
   # Sliding TTL used by usernames like aio-job001.

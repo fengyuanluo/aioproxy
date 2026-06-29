@@ -13,7 +13,8 @@ func TestParseSessionUsername(t *testing.T) {
 	cases := []struct {
 		in, session string
 		ttl         time.Duration
-	}{{"aio", "", 0}, {"aio-job001", "job001", def}, {"aio-job-001", "job-001", def}, {"aio-job-001-30m", "job-001", 30 * time.Minute}, {"aio-job-001-99h", "job-001", max}}
+		fast        bool
+	}{{"aio", "", 0, false}, {"aio-fast", "", 0, true}, {"aio-job001", "job001", def, false}, {"aio-job001-fast", "job001", def, true}, {"aio-job-001", "job-001", def, false}, {"aio-job-001-30m", "job-001", 30 * time.Minute, false}, {"aio-job-001-30m-fast", "job-001", 30 * time.Minute, true}, {"aio-job-001-99h", "job-001", max, false}}
 	for _, tc := range cases {
 		got, ok := ParseSessionUsername(tc.in, "aio", def, max)
 		if !ok {
@@ -24,6 +25,9 @@ func TestParseSessionUsername(t *testing.T) {
 		}
 		if tc.ttl != 0 && got.TTL != tc.ttl {
 			t.Fatalf("%s ttl=%v", tc.in, got.TTL)
+		}
+		if got.Fast != tc.fast {
+			t.Fatalf("%s fast=%v want=%v", tc.in, got.Fast, tc.fast)
 		}
 	}
 	if _, ok := ParseSessionUsername("bob-job", "aio", def, max); ok {
@@ -45,6 +49,10 @@ func TestParseStructuredUsername(t *testing.T) {
 	if !ok || got.SessionID != "job-002" || got.TTL != 30*time.Minute {
 		t.Fatalf("expected ttl-before-session ordering support, got %+v ok=%v", got, ok)
 	}
+	got, ok = ParseSessionUsername("aio~fast=true~plugin=fpl~session=job-003~ttl=30m", "aio", def, max)
+	if !ok || !got.Fast || got.Plugin != "fpl" || got.SessionID != "job-003" {
+		t.Fatalf("expected structured fast username, got %+v ok=%v", got, ok)
+	}
 }
 
 func TestParseStructuredUsernameRejectsInvalid(t *testing.T) {
@@ -54,7 +62,10 @@ func TestParseStructuredUsernameRejectsInvalid(t *testing.T) {
 		"aio~plugin=",
 		"aio~unknown=x",
 		"aio~ttl=30m",
+		"aio~fast=false",
+		"aio~fast=1",
 		"aio~plugin=fofa~plugin=fpl",
+		"aio~fast=true~fast=true",
 		"bob~plugin=fofa",
 	}
 	for _, in := range cases {
@@ -173,6 +184,28 @@ func TestSessionScopedBindingsDoNotCrossPlugin(t *testing.T) {
 	second, ok := sm.Pick(fplInfo, pool, "random")
 	if !ok || second.Source != "fpl" {
 		t.Fatalf("expected fpl candidate, got %+v ok=%v", second, ok)
+	}
+}
+
+func TestSessionScopedBindingsDoNotCrossFastPool(t *testing.T) {
+	pool := NewPool()
+	pool.AddValidated([]Candidate{
+		{Protocol: ProtocolHTTP, Host: "1.1.1.1", Port: 80, Source: "fpl"},
+		{Protocol: ProtocolHTTP, Host: "2.2.2.2", Port: 80, Source: "fpl"},
+	}, nil)
+	sm := NewSessionManager(time.Minute, time.Hour)
+	normalInfo := SessionInfo{Credential: "aio", SessionID: "job-001", TTL: time.Minute, Plugin: "fpl", Fast: false}
+	fastInfo := SessionInfo{Credential: "aio", SessionID: "job-001", TTL: time.Minute, Plugin: "fpl", Fast: true}
+	list := pool.List()
+	sm.Rebind(normalInfo, list[0].Fingerprint)
+	sm.Rebind(fastInfo, list[1].Fingerprint)
+	gotNormal, ok := sm.GetBound(normalInfo, pool)
+	if !ok || gotNormal.Fingerprint != list[0].Fingerprint {
+		t.Fatalf("expected normal binding on first candidate, got %+v ok=%v", gotNormal, ok)
+	}
+	gotFast, ok := sm.GetBound(fastInfo, pool)
+	if !ok || gotFast.Fingerprint != list[1].Fingerprint {
+		t.Fatalf("expected fast binding on second candidate, got %+v ok=%v", gotFast, ok)
 	}
 }
 

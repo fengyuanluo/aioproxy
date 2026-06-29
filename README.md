@@ -6,8 +6,10 @@ AIOPROXY 是一个 Go 编写的单实例代理聚合器，对外提供同端口 
 
 - `plugin`：按插件名筛选候选，例如 `aio~plugin=fpl`
 - `region`：按代理出口国家码筛选候选，例如 `aio~region=US`
+- `fast`：按最近一次成功校验耗时，从命中路由后的最快前百分比候选中调度，例如 `aio-fast`、`aio~fast=true~plugin=fpl`
 
 地区路由依赖候选在更新时通过 `validation.strategy=ip_api_country` 拿到 `countryCode`。
+速度优先路由依赖候选已经有成功的更新期校验耗时记录；百分比由 `scheduler.fast_pool_percent` 控制，默认 `5`。
 
 ## 快速入口
 
@@ -28,8 +30,10 @@ aioproxy serve -c config.yaml
 ```text
 aio
 aio-job-001-30m
+aio-fast
 aio~plugin=fpl
 aio~region=US
+aio~fast=true~plugin=fpl
 aio~plugin=singbox~region=HK~session=job-001~ttl=30m
 ```
 

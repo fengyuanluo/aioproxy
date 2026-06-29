@@ -127,6 +127,35 @@ func TestCheckRejectsNegativeRetryAttempts(t *testing.T) {
 	}
 }
 
+func TestSchedulerFastPoolPercentDefaultAndValidation(t *testing.T) {
+	c := Config{}
+	c.ApplyDefaults()
+	if c.Scheduler.FastPoolPercent != 5 {
+		t.Fatalf("scheduler.fast_pool_percent default=%d want=5", c.Scheduler.FastPoolPercent)
+	}
+	for _, tc := range []struct {
+		value int
+		ok    bool
+	}{
+		{1, true},
+		{5, true},
+		{100, true},
+		{-1, false},
+		{101, false},
+	} {
+		c := Config{}
+		c.ApplyDefaults()
+		c.Scheduler.FastPoolPercent = tc.value
+		r := c.Check()
+		if tc.ok && !r.OK() {
+			t.Fatalf("value=%d expected ok, got errors=%v", tc.value, r.Errors)
+		}
+		if !tc.ok && r.OK() {
+			t.Fatalf("value=%d expected failure", tc.value)
+		}
+	}
+}
+
 func TestSingBoxValidationConcurrencyDefaultAndValidation(t *testing.T) {
 	c := Config{Plugins: PluginsConfig{SingBox: &SingBoxConfig{Sources: []SingBoxSourceConfig{{Name: "s", Type: "inline", URL: "outbounds: []"}}}}}
 	c.ApplyDefaults()

@@ -6,7 +6,7 @@
 flowchart LR
   Client[HTTP/SOCKS5 Client] --> Mixed[Mixed Proxy Listener]
   Mixed --> Auth[Auth + Session Parser]
-  Auth --> Route[Plugin/Region Route Filter]
+  Auth --> Route[Plugin/Region/Fast Route Filter]
   Route --> Scheduler[Scheduler + Session Binding]
   Scheduler --> Pool[Candidate Pool]
   Pool --> HTTP[HTTP Upstream]
@@ -44,7 +44,8 @@ sequenceDiagram
 flowchart TD
   Req[Client Request] --> Parse[Protocol + Auth]
   Parse --> Filter[plugin / region filter]
-  Filter --> Sess{Session ID?}
+  Filter --> Fast[optional fast cutoff by validation latency]
+  Fast --> Sess{Session ID?}
   Sess -- yes --> Bind[Find/Rebind Candidate in Filtered Pool]
   Sess -- no --> Policy[random/round_robin in Filtered Pool]
   Bind --> Dial[Dial Upstream]
@@ -55,7 +56,7 @@ flowchart TD
   Fail -- no --> OK[Keep candidate available]
 ```
 
-说明：若 `plugin` / `region` 过滤后没有可用候选，请求直接 fail fast，不回退全局池。
+说明：若请求带 `fast`，则在 `plugin` / `region` 过滤后，再按最近一次成功 validation 耗时升序截取前 `scheduler.fast_pool_percent` 的候选；只要命中候选非空，至少保留 1 个。若过滤后没有可用候选，请求直接 fail fast，不回退全局池。
 
 ## sing-box 节点桥接
 

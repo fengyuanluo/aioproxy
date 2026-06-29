@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sort"
 	"testing"
+	"time"
 )
 
 func TestRandomPickLargePoolAvoidsPerPickAllocation(t *testing.T) {
@@ -47,6 +49,90 @@ func TestRandomPickHonorsMatchAndExclude(t *testing.T) {
 		if got.Fingerprint != list[1].Fingerprint {
 			t.Fatalf("pick %d got fingerprint %s host=%s, want only non-excluded fpl candidate %s", i, got.Fingerprint, got.Host, list[1].Fingerprint)
 		}
+	}
+}
+
+func TestPickMatchingPercentExcludingKeepsFastestRouteScopedCandidates(t *testing.T) {
+	pool := NewPool()
+	pool.AddValidated([]Candidate{
+		{Protocol: ProtocolHTTP, Host: "1.1.1.1", Port: 80, Source: "fpl", LastValidationLatency: 10 * time.Millisecond},
+		{Protocol: ProtocolHTTP, Host: "2.2.2.2", Port: 80, Source: "fpl", LastValidationLatency: 20 * time.Millisecond},
+		{Protocol: ProtocolHTTP, Host: "3.3.3.3", Port: 80, Source: "fpl", LastValidationLatency: 30 * time.Millisecond},
+		{Protocol: ProtocolHTTP, Host: "4.4.4.4", Port: 80, Source: "fofa", LastValidationLatency: time.Millisecond},
+	}, nil)
+	for i := 0; i < 50; i++ {
+		got, ok := pool.PickMatchingPercentExcluding("random", func(c Candidate) bool {
+			return c.MatchesRoute("fpl", "")
+		}, nil, 34)
+		if !ok {
+			t.Fatal("expected fast pick to succeed")
+		}
+		if got.Host != "1.1.1.1" {
+			t.Fatalf("got host=%s want fastest fpl candidate", got.Host)
+		}
+	}
+}
+
+func TestPickMatchingPercentExcludingRoundRobinUsesFastSubset(t *testing.T) {
+	pool := NewPool()
+	pool.AddValidated([]Candidate{
+		{Protocol: ProtocolHTTP, Host: "1.1.1.1", Port: 80, Source: "fpl", LastValidationLatency: 10 * time.Millisecond},
+		{Protocol: ProtocolHTTP, Host: "2.2.2.2", Port: 80, Source: "fpl", LastValidationLatency: 20 * time.Millisecond},
+		{Protocol: ProtocolHTTP, Host: "3.3.3.3", Port: 80, Source: "fpl", LastValidationLatency: 30 * time.Millisecond},
+		{Protocol: ProtocolHTTP, Host: "4.4.4.4", Port: 80, Source: "fpl", LastValidationLatency: 40 * time.Millisecond},
+	}, nil)
+	want := []string{"1.1.1.1", "2.2.2.2", "1.1.1.1", "2.2.2.2"}
+	for i, host := range want {
+		got, ok := pool.PickMatchingPercentExcluding("round_robin", func(c Candidate) bool { return c.MatchesRoute("fpl", "") }, nil, 50)
+		if !ok {
+			t.Fatalf("pick %d failed", i)
+		}
+		if got.Host != host {
+			t.Fatalf("pick %d host=%s want=%s", i, got.Host, host)
+		}
+	}
+}
+
+func TestPickMatchingPercentExcludingKeepsAtLeastOneCandidate(t *testing.T) {
+	pool := NewPool()
+	pool.AddValidated([]Candidate{
+		{Protocol: ProtocolHTTP, Host: "1.1.1.1", Port: 80, Source: "fpl", LastValidationLatency: 20 * time.Millisecond},
+		{Protocol: ProtocolHTTP, Host: "2.2.2.2", Port: 80, Source: "fpl", LastValidationLatency: 10 * time.Millisecond},
+	}, nil)
+	got, ok := pool.PickMatchingPercentExcluding("random", func(c Candidate) bool { return c.MatchesRoute("fpl", "") }, nil, 5)
+	if !ok {
+		t.Fatal("expected at least one fast candidate")
+	}
+	if got.Host != "2.2.2.2" {
+		t.Fatalf("got host=%s want fastest candidate", got.Host)
+	}
+}
+
+func TestPickMatchingPercentExcludingPushesUnknownLatencyToEnd(t *testing.T) {
+	pool := NewPool()
+	pool.AddValidated([]Candidate{
+		{Protocol: ProtocolHTTP, Host: "1.1.1.1", Port: 80, Source: "fpl"},
+		{Protocol: ProtocolHTTP, Host: "2.2.2.2", Port: 80, Source: "fpl", LastValidationLatency: 5 * time.Millisecond},
+		{Protocol: ProtocolHTTP, Host: "3.3.3.3", Port: 80, Source: "fpl", LastValidationLatency: 10 * time.Millisecond},
+	}, nil)
+	seen := make(map[string]struct{})
+	for i := 0; i < 50; i++ {
+		got, ok := pool.PickMatchingPercentExcluding("random", func(c Candidate) bool { return c.MatchesRoute("fpl", "") }, nil, 67)
+		if !ok {
+			t.Fatal("expected fast pick")
+		}
+		seen[got.Host] = struct{}{}
+		if got.Host == "1.1.1.1" {
+			t.Fatal("candidate with unknown latency should not enter truncated fast subset")
+		}
+	}
+	if len(seen) != 2 {
+		keys := make([]string, 0, len(seen))
+		for k := range seen {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		t.Fatalf("expected only the two timed candidates, saw %v", keys)
 	}
 }
 

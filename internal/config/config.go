@@ -151,7 +151,8 @@ func (a *AuthConfig) UnmarshalYAML(value *yaml.Node) error {
 }
 
 type SchedulerConfig struct {
-	Policy string `yaml:"policy"`
+	Policy          string `yaml:"policy"`
+	FastPoolPercent int    `yaml:"fast_pool_percent"`
 }
 
 type SessionConfig struct {
@@ -276,6 +277,9 @@ func (c *Config) ApplyDefaults() {
 	// bool zero-value cannot distinguish omitted from false; example config sets true explicitly.
 	if c.Scheduler.Policy == "" {
 		c.Scheduler.Policy = DefaultSchedulerPolicy
+	}
+	if c.Scheduler.FastPoolPercent == 0 {
+		c.Scheduler.FastPoolPercent = 5
 	}
 	if c.Session.DefaultTTL.Duration == 0 {
 		c.Session.DefaultTTL.Duration = 30 * time.Minute
@@ -409,6 +413,9 @@ func (c *Config) Check() CheckResult {
 	}
 	if c.Scheduler.Policy != "random" && c.Scheduler.Policy != "round_robin" {
 		r.Errors = append(r.Errors, "scheduler.policy must be random or round_robin")
+	}
+	if c.Scheduler.FastPoolPercent < 1 || c.Scheduler.FastPoolPercent > 100 {
+		r.Errors = append(r.Errors, "scheduler.fast_pool_percent must be between 1 and 100")
 	}
 	if c.Session.DefaultTTL.Duration <= 0 || c.Session.MaxTTL.Duration <= 0 {
 		r.Errors = append(r.Errors, "session TTLs must be positive")

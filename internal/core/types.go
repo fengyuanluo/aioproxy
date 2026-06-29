@@ -21,22 +21,23 @@ const (
 )
 
 type Candidate struct {
-	ID             string            `json:"id"`
-	Fingerprint    string            `json:"fingerprint"`
-	Protocol       string            `json:"protocol"`
-	Host           string            `json:"host,omitempty"`
-	Port           int               `json:"port,omitempty"`
-	Username       string            `json:"username,omitempty"`
-	Password       string            `json:"password,omitempty"`
-	Source         string            `json:"source"`
-	Name           string            `json:"name,omitempty"`
-	Status         string            `json:"status"`
-	FailureCount   int               `json:"failure_count"`
-	LastValidation time.Time         `json:"last_validation,omitempty"`
-	LastError      string            `json:"last_error,omitempty"`
-	Metadata       map[string]string `json:"metadata,omitempty"`
-	CreatedAt      time.Time         `json:"created_at"`
-	UpdatedAt      time.Time         `json:"updated_at"`
+	ID                    string            `json:"id"`
+	Fingerprint           string            `json:"fingerprint"`
+	Protocol              string            `json:"protocol"`
+	Host                  string            `json:"host,omitempty"`
+	Port                  int               `json:"port,omitempty"`
+	Username              string            `json:"username,omitempty"`
+	Password              string            `json:"password,omitempty"`
+	Source                string            `json:"source"`
+	Name                  string            `json:"name,omitempty"`
+	Status                string            `json:"status"`
+	FailureCount          int               `json:"failure_count"`
+	LastValidation        time.Time         `json:"last_validation,omitempty"`
+	LastValidationLatency time.Duration     `json:"last_validation_latency,omitempty"`
+	LastError             string            `json:"last_error,omitempty"`
+	Metadata              map[string]string `json:"metadata,omitempty"`
+	CreatedAt             time.Time         `json:"created_at"`
+	UpdatedAt             time.Time         `json:"updated_at"`
 }
 
 func (c Candidate) MatchesRoute(plugin, region string) bool {

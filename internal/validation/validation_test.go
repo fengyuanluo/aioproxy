@@ -51,3 +51,32 @@ func TestValidateCandidateIPAPICountry(t *testing.T) {
 		t.Fatalf("unexpected metadata: %+v", got.Metadata)
 	}
 }
+
+func TestValidateRecordsLatencyOnSuccessfulCandidates(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(20 * time.Millisecond)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer ts.Close()
+	v := New(config.ValidationConfig{
+		Strategy:      config.ValidationStrategyHTTPStatus,
+		URL:           ts.URL,
+		SuccessStatus: []int{http.StatusNoContent},
+		Timeout:       config.Duration{Duration: time.Second},
+		Concurrency:   1,
+	})
+	candidate := core.Candidate{Protocol: core.ProtocolSingBox, Source: "test"}
+	candidate.Normalize()
+	valid := v.Validate(context.Background(), []core.Candidate{candidate}, map[string]core.CandidateDialer{
+		candidate.Fingerprint: proxy.DirectDialer{},
+	})
+	if len(valid) != 1 {
+		t.Fatalf("valid=%d want=1", len(valid))
+	}
+	if valid[0].LastValidationLatency <= 0 {
+		t.Fatalf("expected positive validation latency, got %v", valid[0].LastValidationLatency)
+	}
+	if valid[0].LastValidation.IsZero() {
+		t.Fatal("expected last validation timestamp to be set")
+	}
+}

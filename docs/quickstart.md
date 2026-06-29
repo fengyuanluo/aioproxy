@@ -38,6 +38,13 @@ curl -x http://aio~plugin=fpl:change-me@127.0.0.1:1080 http://example.com/
 curl -x http://aio~region=US:change-me@127.0.0.1:1080 http://example.com/
 ```
 
+速度优先用户名示例：
+
+```bash
+curl -x http://aio-fast:change-me@127.0.0.1:1080 http://example.com/
+curl -x http://aio~fast=true~plugin=fpl:change-me@127.0.0.1:1080 http://example.com/
+```
+
 组合路由用户名示例：
 
 ```bash

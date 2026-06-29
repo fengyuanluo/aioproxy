@@ -27,6 +27,7 @@ type SessionInfo struct {
 	TTL        time.Duration
 	Plugin     string
 	Region     string
+	Fast       bool
 }
 
 func NewSessionManager(defaultTTL, maxTTL time.Duration) *SessionManager {
@@ -37,8 +38,16 @@ func ParseSessionUsername(username, credential string, defaultTTL, maxTTL time.D
 	if strings.Contains(username, "~") {
 		return ParseStructuredUsername(username, credential, defaultTTL, maxTTL)
 	}
+	fast := false
+	if username == credential+"-fast" {
+		return SessionInfo{Credential: credential, Fast: true}, true
+	}
+	if strings.HasSuffix(username, "-fast") {
+		username = strings.TrimSuffix(username, "-fast")
+		fast = true
+	}
 	if username == credential {
-		return SessionInfo{Credential: credential}, true
+		return SessionInfo{Credential: credential, Fast: fast}, true
 	}
 	prefix := credential + "-"
 	if !strings.HasPrefix(username, prefix) {
@@ -62,7 +71,7 @@ func ParseSessionUsername(username, credential string, defaultTTL, maxTTL time.D
 	if maxTTL > 0 && ttl > maxTTL {
 		ttl = maxTTL
 	}
-	return SessionInfo{Credential: credential, SessionID: sessionID, TTL: ttl}, true
+	return SessionInfo{Credential: credential, SessionID: sessionID, TTL: ttl, Fast: fast}, true
 }
 
 func ParseStructuredUsername(username, credential string, defaultTTL, maxTTL time.Duration) (SessionInfo, bool) {
@@ -88,6 +97,11 @@ func ParseStructuredUsername(username, credential string, defaultTTL, maxTTL tim
 		}
 		seen[key] = true
 		switch key {
+		case "fast":
+			if !strings.EqualFold(val, "true") {
+				return SessionInfo{}, false
+			}
+			info.Fast = true
 		case "plugin":
 			info.Plugin = strings.ToLower(val)
 		case "region":
@@ -123,7 +137,7 @@ func (i SessionInfo) BindingKey() string {
 	if i.SessionID == "" {
 		return ""
 	}
-	return fmt.Sprintf("plugin=%s|region=%s|session=%s", strings.ToLower(i.Plugin), strings.ToUpper(i.Region), i.SessionID)
+	return fmt.Sprintf("plugin=%s|region=%s|fast=%t|session=%s", strings.ToLower(i.Plugin), strings.ToUpper(i.Region), i.Fast, i.SessionID)
 }
 
 func (m *SessionManager) Pick(info SessionInfo, pool *Pool, policy string) (Candidate, bool) {

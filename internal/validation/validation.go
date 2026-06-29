@@ -48,8 +48,10 @@ func (v *Validator) Validate(ctx context.Context, candidates []core.Candidate, d
 				if dialers != nil {
 					dialer = dialers[c.Fingerprint]
 				}
+				start := time.Now()
 				if validated, err := v.ValidateCandidate(ctx, c, dialer); err == nil {
 					validated.LastValidation = time.Now()
+					validated.LastValidationLatency = time.Since(start)
 					out <- validated
 				}
 			}

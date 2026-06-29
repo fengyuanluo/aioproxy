@@ -2,6 +2,7 @@ package core
 
 import (
 	"math/rand"
+	"sort"
 	"sync"
 	"time"
 )
@@ -211,6 +212,54 @@ func (p *Pool) Pick(policy string) (Candidate, bool) {
 
 func (p *Pool) PickMatching(policy string, match func(Candidate) bool) (Candidate, bool) {
 	return p.PickMatchingExcluding(policy, match, nil)
+}
+
+func (p *Pool) PickMatchingPercentExcluding(policy string, match func(Candidate) bool, exclude map[string]struct{}, percent int) (Candidate, bool) {
+	if percent >= 100 {
+		return p.PickMatchingExcluding(policy, match, exclude)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	eligible := make([]Candidate, 0, len(p.order))
+	for _, fp := range p.order {
+		if _, skip := exclude[fp]; skip {
+			continue
+		}
+		if c, ok := p.items[fp]; ok && c.Status == StatusAvailable && match(c) {
+			eligible = append(eligible, c)
+		}
+	}
+	if len(eligible) == 0 {
+		return Candidate{}, false
+	}
+	sort.SliceStable(eligible, func(i, j int) bool {
+		li := eligible[i].LastValidationLatency
+		lj := eligible[j].LastValidationLatency
+		switch {
+		case li <= 0 && lj <= 0:
+			return false
+		case li <= 0:
+			return false
+		case lj <= 0:
+			return true
+		default:
+			return li < lj
+		}
+	})
+	keep := len(eligible) * percent / 100
+	if keep < 1 {
+		keep = 1
+	}
+	if keep > len(eligible) {
+		keep = len(eligible)
+	}
+	eligible = eligible[:keep]
+	if policy == "round_robin" {
+		idx := p.rr % len(eligible)
+		p.rr++
+		return eligible[idx], true
+	}
+	return eligible[rand.Intn(len(eligible))], true
 }
 
 func (p *Pool) PickMatchingExcluding(policy string, match func(Candidate) bool, exclude map[string]struct{}) (Candidate, bool) {

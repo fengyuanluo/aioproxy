@@ -35,4 +35,6 @@ curl -H 'Authorization: Bearer <token>' http://host:1081/health
 
 其中 `CountryCode` / `Country` 只有在候选经过 `ip_api_country` 验活并成功返回国家信息时才会出现。
 
+当前 Admin API **不单独暴露** fast 池视图，也不返回 `last_validation_latency`；fast 调度属于运行时选择逻辑，依据候选最近一次成功更新期校验耗时在内存中排序后截取。
+
 Admin API 不提供刷新、删除、修改等 mutation。真实深度调试看文件日志；debug 日志可能包含敏感原文。
